@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AIOps Command Center</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <aside>
+    <div class="brand"><span>A</span><div><strong>AIOps</strong><small>Command Center</small></div></div>
+    <nav>
+      <button data-page="dashboard" class="active">Visão geral</button>
+      <button data-page="manager">Gerente</button>
+      <button data-page="agents">Agentes</button>
+      <button data-page="projetos">Projetos</button>
+      <button data-page="consumo">Consumo</button>
+      <button data-page="reports">Relatórios</button>
+      <button data-page="runs">Execuções</button>
+      <button data-page="ferramentas">Ferramentas</button>
+      <button data-page="ailogs">Log IA</button>
+      <div id="custom-nav" class="custom-nav"></div>
+      <button data-page="settings">Configurações</button>
+    </nav>
+    <div class="health"><i></i><span>Central conectada</span></div>
+  </aside>
+  <main>
+    <header><div><h1 id="title">Visão geral</h1><p id="subtitle">Operação integrada do ambiente</p></div><button class="ghost" onclick="refresh()">Atualizar</button></header>
+    <section id="dashboard" class="page active">
+      <div id="metrics" class="metrics"></div>
+      <div class="ticket-queues">
+        <div class="panel queue-panel"><div class="panel-title"><div><h2>Chamados abertos</h2><p>Fila do mais antigo para o mais novo</p></div><span id="open-count" class="queue-count"></span></div><div id="open-tickets" class="ticket-list"></div></div>
+        <div class="panel queue-panel"><div class="panel-title"><div><h2>Em andamento</h2><p>Chamados em atendimento ou planejados</p></div><span id="progress-count" class="queue-count"></span></div><div id="progress-tickets" class="ticket-list"></div></div>
+        <div class="panel queue-panel"><div class="panel-title"><div><h2>Pendentes</h2><p>Aguardando revisão, retorno ou desbloqueio</p></div><span id="pending-count" class="queue-count"></span></div><div id="pending-tickets" class="ticket-list"></div></div>
+      </div>
+      <div class="panel"><div class="panel-title"><h2>Execuções recentes</h2></div><div id="recent-runs"></div></div>
+    </section>
+    <section id="manager" class="page">
+      <div class="manager-layout">
+        <div class="panel chat-list-panel">
+          <div class="panel-title"><div><h2>Conversas</h2><p>Web, Telegram e Slack</p></div></div>
+          <div id="channel-list" class="channel-list"></div>
+        </div>
+        <div class="panel chat-panel">
+          <div class="panel-title manager-head"><div><h2 id="chat-title">Gerente AIOps</h2><p id="chat-sub">Conversa naturalmente e usa chamados e ferramentas quando necessário</p></div><div class="manager-controls"><button id="chat-account-btn" class="ghost hidden" onclick="openChatAccount()">Configurar conta GLPI</button><button class="ghost" onclick="reindex()">Reindexar RAG</button></div></div>
+          <div id="messages" class="messages"></div>
+          <div id="attach-preview" class="attach-preview"></div>
+          <form id="chat-form" class="chat-input">
+            <input type="file" id="chat-files" multiple accept="image/*,audio/*,video/*,application/pdf,.txt,.csv,.md" hidden>
+            <button type="button" class="ghost attach-btn" title="Anexar imagem, áudio, vídeo ou documento" onclick="document.getElementById('chat-files').click()">📎</button>
+            <textarea id="chat-message" placeholder="Pergunte, peça uma ação ou envie um anexo..."></textarea>
+            <button>Enviar</button>
+          </form>
+        </div>
+      </div>
+    </section>
+    <section id="agents" class="page">
+      <div class="toolbar"><p>Agentes executam no Windows usando os logins locais do OpenCode e Claude.</p><button onclick="openAgent()">Novo agente</button></div>
+      <div id="agent-list" class="cards"></div>
+    </section>
+    <section id="projetos" class="page">
+      <div class="toolbar"><p>Codebases registradas para análise e documentação automática via OpenCode.</p><button onclick="openProject()">Novo projeto</button></div>
+      <div id="project-list" class="cards"></div>
+    </section>
+    <section id="consumo" class="page">
+      <div class="toolbar">
+        <p>Consumo de tokens das chamadas de IA (Gerente, análise de incidentes, embeddings) e custo estimado.</p>
+        <div class="range-tabs">
+          <button class="range-btn active" data-range="day" onclick="setRange('day')">Dia</button>
+          <button class="range-btn" data-range="week" onclick="setRange('week')">Semana</button>
+          <button class="range-btn" data-range="month" onclick="setRange('month')">Mês</button>
+        </div>
+      </div>
+      <div id="usage-metrics" class="metrics"></div>
+      <div class="usage-grid">
+        <div class="panel"><div class="panel-title"><h2>Consumo ao longo do tempo</h2></div><div id="usage-line"></div></div>
+        <div class="panel"><div class="panel-title"><h2>Tokens por modelo</h2></div><div id="usage-models"></div></div>
+        <div class="panel"><div class="panel-title"><h2>Por origem</h2></div><div id="usage-features"></div></div>
+        <div class="panel"><div class="panel-title"><h2>Top uso de agentes</h2></div><div id="usage-agents"></div></div>
+      </div>
+    </section>
+    <section id="reports" class="page">
+      <div class="report-layout">
+        <aside class="panel report-filters">
+          <div class="panel-title"><div><h2>Configurar relatório</h2><p>Combine período, equipe e situação dos chamados.</p></div></div>
+          <form id="report-form">
+            <div class="report-presets">
+              <button type="button" class="ghost report-preset" data-preset="day">Hoje</button>
+              <button type="button" class="ghost report-preset" data-preset="week">Semana</button>
+              <button type="button" class="ghost report-preset active" data-preset="month">Mês</button>
+              <button type="button" class="ghost report-preset" data-preset="year">Ano</button>
+            </div>
+            <div class="row">
+              <label>Data inicial<input type="date" id="report-start" required></label>
+              <label>Data final<input type="date" id="report-end" required></label>
+            </div>
+            <label>Considerar período pela
+              <select id="report-date-basis">
+                <option value="created">Data de criação</option>
+                <option value="updated">Última atualização</option>
+                <option value="solved">Data de solução</option>
+              </select>
+            </label>
+            <div class="filter-group">
+              <div class="filter-head"><strong>Técnicos</strong><button type="button" class="text-btn" onclick="toggleAllReportTechs()">Selecionar todos</button></div>
+              <input id="report-tech-search" placeholder="Buscar técnico..." autocomplete="off">
+              <div id="report-technicians" class="check-list"><span class="meta">Carregando técnicos...</span></div>
+              <label class="check"><input type="checkbox" id="report-unassigned"> Incluir não atribuídos</label>
+            </div>
+            <div class="filter-group">
+              <strong>Status</strong>
+              <div id="report-statuses" class="check-grid"></div>
+            </div>
+            <div class="filter-group">
+              <strong>Tipo</strong>
+              <div id="report-types" class="check-grid"></div>
+            </div>
+            <label class="check"><input type="checkbox" id="report-details" checked> Incluir tarefas, acompanhamentos e resumo no PDF</label>
+            <div class="report-actions">
+              <button type="submit">Gerar prévia</button>
+              <button type="button" class="ghost" id="report-pdf" onclick="downloadReportPdf()">Baixar PDF</button>
+            </div>
+          </form>
+        </aside>
+        <div class="report-content">
+          <div id="report-empty" class="panel report-empty">
+            <div class="report-empty-icon">R</div>
+            <h2>Relatório operacional</h2>
+            <p>Defina os filtros ao lado para consolidar volume, resolução, produtividade e detalhes dos chamados.</p>
+          </div>
+          <div id="report-result" class="hidden">
+            <div id="report-metrics" class="metrics report-metrics"></div>
+            <div class="report-summary-grid">
+              <div class="panel"><div class="panel-title"><h2>Por status</h2></div><div id="report-status-chart"></div></div>
+              <div class="panel"><div class="panel-title"><h2>Por técnico</h2></div><div id="report-tech-chart"></div></div>
+            </div>
+            <div class="panel">
+              <div class="panel-title"><div><h2>Desempenho da equipe</h2><p>Volume atual e atividades registradas no período.</p></div></div>
+              <div id="report-team-table" class="table-wrap"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-title"><div><h2>Chamados incluídos</h2><p id="report-ticket-caption"></p></div></div>
+              <div id="report-ticket-table" class="table-wrap"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="settings" class="page">
+      <div class="panel">
+        <div class="panel-title"><div><h2>Telas personalizadas</h2><p>Adicione sites como abas na barra lateral (Grafana, GLPI, Trello…). Defina nome, URL e um ícone.</p></div></div>
+        <form id="view-form" class="view-form">
+          <input type="hidden" id="view-id">
+          <label class="icon-field">Ícone<input id="view-icon" maxlength="2" placeholder="📊"></label>
+          <label>Nome<input id="view-label" required placeholder="Grafana"></label>
+          <label>URL<input id="view-url" required type="url" placeholder="https://metrics.exemplo.com"></label>
+          <div class="view-form-actions"><button type="button" class="ghost" onclick="resetViewForm()">Limpar</button><button>Salvar tela</button></div>
+        </form>
+        <div id="views-list" class="views-list"></div>
+      </div>
+      <div class="panel"><div class="panel-title"><div><h2>Integrações e credenciais</h2><p>Segredos são criptografados no PostgreSQL.</p></div></div><form id="settings-form" class="settings-grid"></form><div class="form-actions"><button form="settings-form">Salvar configurações</button></div></div>
+    </section>
+    <section id="runs" class="page">
+      <div class="panel"><div class="panel-title"><h2>Histórico dos agentes</h2></div><div id="runs-table"></div></div>
+    </section>
+    <section id="ailogs" class="page">
+      <div class="ai-log-toolbar">
+        <div>
+          <h2 style="margin:0">Log de IA</h2>
+          <p class="meta" style="margin:4px 0 0">Tudo que envolve modelos, agentes, ferramentas e indexação em tempo real</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="ai-log-count" class="meta" style="font-size:11px"></span>
+          <button class="ghost" id="ai-log-pause" onclick="aiLogTogglePause()">Pausar</button>
+          <button class="ghost" onclick="aiLogClear()">Limpar</button>
+        </div>
+      </div>
+      <div id="ai-console" class="ai-console"></div>
+    </section>
+    <section id="ferramentas" class="page">
+      <div class="tools-tabs">
+        <button class="tools-tab active" data-tool="visual" onclick="selectTool('visual')">Visual</button>
+        <button class="tools-tab" data-tool="pentest" onclick="selectTool('pentest')">Pentest</button>
+        <button class="tools-tab" data-tool="stress" onclick="selectTool('stress')">Stress</button>
+      </div>
+      <div class="tools-grid">
+        <div class="panel tools-side">
+          <div class="panel-title"><div><h2 id="tools-title">Regressão Visual</h2><p id="tools-desc" class="meta">Playwright · screenshots por tela</p></div></div>
+          <form id="tools-form" onsubmit="return runTool(event)">
+            <label>URL do alvo<input id="tool-url" placeholder="(obrigatório — ex: https://app.omni-inbox.ai)"></label>
+            <div id="tool-opts"></div>
+            <div class="form-actions"><button id="tool-run-btn">Nova execução</button></div>
+          </form>
+          <div class="tools-runs" id="tools-runs"></div>
+        </div>
+        <div class="panel tools-detail" id="tools-detail">
+          <div class="empty-state">Selecione uma execução para ver o passo-a-passo, o relatório e o uso de tokens.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="agent-dialog">
+    <form id="agent-form">
+      <input type="hidden" id="agent-id">
+      <div class="dialog-head"><div><h2>Configurar agente</h2><p>O ambiente imutável será anexado automaticamente.</p></div><button type="button" class="icon" onclick="closeAgent()">×</button></div>
+      <label>Nome<input id="agent-name" required></label>
+      <label>Descrição<input id="agent-description"></label>
+      <div class="row"><label>CLI<select id="agent-provider"><option value="OPENCODE">OpenCode</option><option value="CLAUDE">Claude Code</option></select></label><label>Perfil<select id="agent-mode"><option value="ANALYZE">Somente analisa</option><option value="EXECUTE">Analisa e executa</option><option value="REPORT">Gera relatórios</option><option value="AUDIT">Auditoria</option></select></label></div>
+      <label>Pasta do projeto no Windows<div class="folder-field"><input id="agent-path" placeholder="C:\Projetos\MeuSistema" required><button type="button" class="ghost" onclick="pickFolder(this)">Selecionar pasta</button></div></label>
+      <label>Modelo opcional<input id="agent-model" placeholder="Usar padrão do CLI"></label>
+      <label>Instruções personalizadas<textarea id="agent-instructions" rows="7"></textarea></label>
+      <label class="check"><input type="checkbox" id="agent-enabled" checked> Agente ativo</label>
+      <div id="agent-result" class="result hidden"></div>
+      <div class="form-actions"><button type="button" class="ghost" onclick="closeAgent()">Cancelar</button><button>Salvar</button></div>
+    </form>
+  </dialog>
+  <dialog id="project-dialog">
+    <form id="project-form">
+      <input type="hidden" id="project-id">
+      <div class="dialog-head"><div><h2>Cadastrar codebase</h2><p>Registre o caminho da pasta do projeto no Windows.</p></div><button type="button" class="icon" onclick="closeProject()">×</button></div>
+      <label>Nome do projeto<input id="project-name" required placeholder="Meu Sistema"></label>
+      <label>Descrição opcional<input id="project-description" placeholder="Sistema de gestão empresarial"></label>
+      <label>Caminho da pasta no Windows<div class="folder-field"><input id="project-path" placeholder="C:\Projetos\MeuSistema" required><button type="button" class="ghost" onclick="pickProjectFolder(this)">Selecionar pasta</button></div></label>
+
+      <details class="ssh-config">
+        <summary>Conexão SSH <span class="meta">(opcional — para diagnósticos remotos)</span></summary>
+        <div class="ssh-grid">
+          <label>Host / IP<input id="project-ssh-host" placeholder="192.168.1.100"></label>
+          <label>Porta<input id="project-ssh-port" type="number" value="22" placeholder="22" min="1" max="65535"></label>
+          <label>Usuário<input id="project-ssh-user" placeholder="root"></label>
+          <label>Tipo de autenticação<select id="project-ssh-auth-type"><option value="pm2">PM2 (execução local pelo runner)</option><option value="key">Chave SSH (key)</option><option value="password">Senha</option></select></label>
+          <label id="project-ssh-key-field" class="hidden">Caminho da chave privada<input id="project-ssh-key-path" placeholder="~/.ssh/id_rsa"></label>
+          <label id="project-ssh-password-field" class="hidden">Senha SSH<input id="project-ssh-password" type="password" placeholder="senha"></label>
+        </div>
+      </details>
+
+      <div id="project-result" class="result hidden"></div>
+      <div class="form-actions"><button type="button" class="ghost" onclick="closeProject()">Cancelar</button><button>Salvar</button></div>
+    </form>
+  </dialog>
+  <dialog id="project-doc-dialog" class="doc-dialog">
+    <div class="dialog-head"><div><h2 id="doc-title">Documentação</h2><p id="doc-subtitle" class="meta"></p></div><button type="button" class="icon" onclick="closeProjectDoc()">×</button></div>
+    <div id="doc-content" class="doc-content"></div>
+  </dialog>
+  <dialog id="chat-account-dialog">
+    <form id="chat-account-form">
+      <div class="dialog-head"><div><h2>Conta GLPI da conversa</h2><p id="chat-account-channel"></p></div><button type="button" class="icon" onclick="closeChatAccount()">×</button></div>
+      <label>Ação<select id="chat-account-mode"><option value="link">Vincular conta existente</option><option value="create">Criar uma nova conta</option></select></label>
+      <label id="chat-account-existing-field">Conta GLPI<select id="chat-account-existing"><option value="">Carregando contas...</option></select></label>
+      <label id="chat-account-username-field" class="hidden">Username GLPI<input id="chat-account-username" minlength="3" maxlength="64" autocomplete="off" placeholder="nome.sobrenome"></label>
+      <label id="chat-account-name-field" class="hidden">Nome completo<input id="chat-account-display-name" maxlength="120" placeholder="Nome da pessoa"></label>
+      <p id="chat-account-help" class="meta"></p>
+      <div id="chat-account-result" class="result hidden"></div>
+      <div class="form-actions"><button type="button" class="ghost" onclick="closeChatAccount()">Cancelar</button><button id="chat-account-submit">Vincular conta</button></div>
+    </form>
+  </dialog>
+  <dialog id="run-dialog" class="run-dialog">
+    <div class="dialog-head"><div><h2 id="run-title">Execução do agente</h2><p id="run-subtitle" class="meta"></p></div><button type="button" class="icon" onclick="closeRun()">×</button></div>
+    <div id="run-detail-meta" class="run-detail-meta"></div>
+    <pre id="run-console" class="run-console">Carregando console...</pre>
+  </dialog>
+  <script src="/app.js"></script>
+  <script>
+  (function () {
+    var lastTs = 0, paused = false, total = 0;
+
+    var LEVEL_LABEL = { 10:'TRC', 20:'DBG', 30:'INF', 40:'WRN', 50:'ERR', 60:'FTL' };
+    var LEVEL_CLASS  = { 10:'lv10', 20:'lv20', 30:'lv30', 40:'lv40', 50:'lv50', 60:'lv60' };
+
+    var SKIP_FIELDS = new Set(['v','err']);
+
+    function fmtTime(ms) {
+      var d = new Date(ms);
+      return d.toLocaleTimeString('pt-BR', { hour12: false });
+    }
+
+    function fmtFields(fields) {
+      var parts = [];
+      for (var k in fields) {
+        if (SKIP_FIELDS.has(k)) continue;
+        var v = fields[k];
+        if (v === null || v === undefined) continue;
+        if (Array.isArray(v)) v = v.join(',');
+        else if (typeof v === 'object') v = JSON.stringify(v);
+        parts.push(k + '=' + v);
+      }
+      return parts.length ? ' │ ' + parts.join('  ') : '';
+    }
+
+    function fmtErr(fields) {
+      if (!fields.err) return '';
+      var e = fields.err;
+      var msg = (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : String(e);
+      // truncate long error messages
+      if (msg.length > 200) msg = msg.slice(0, 200) + '…';
+      return '\n  └ ' + msg;
+    }
+
+    function appendEntries(entries) {
+      var cons = document.getElementById('ai-console');
+      if (!cons) return;
+      var atBottom = cons.scrollHeight - cons.scrollTop - cons.clientHeight < 40;
+      entries.forEach(function (e) {
+        total++;
+        var lv = Math.floor(e.level / 10) * 10;
+        var row = document.createElement('div');
+        row.className = 'ai-log-row ' + (LEVEL_CLASS[lv] || 'lv30');
+        var fields = Object.assign({}, e.fields);
+        var errLine = fmtErr(fields);
+        delete fields.err;
+        row.innerHTML =
+          '<span class="ai-ts">' + fmtTime(e.ts) + '</span>' +
+          '<span class="ai-lv">' + (LEVEL_LABEL[lv] || 'INF') + '</span>' +
+          '<span class="ai-msg">' + escHtml(e.msg) + escHtml(fmtFields(fields)) + '</span>' +
+          (errLine ? '<span class="ai-err">' + escHtml(errLine) + '</span>' : '');
+        cons.appendChild(row);
+        // keep buffer size manageable in DOM
+        if (cons.children.length > 600) cons.removeChild(cons.firstChild);
+      });
+      var cnt = document.getElementById('ai-log-count');
+      if (cnt) cnt.textContent = total + ' eventos';
+      if (!paused && atBottom) cons.scrollTop = cons.scrollHeight;
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    async function fetchLogs() {
+      if (paused) return;
+      var page = document.getElementById('ailogs');
+      if (!page || !page.classList.contains('active')) return;
+      try {
+        var r = await fetch('/api/logs/ai?since=' + lastTs);
+        if (!r.ok) return;
+        var entries = await r.json();
+        if (!entries.length) return;
+        lastTs = entries[entries.length - 1].ts;
+        appendEntries(entries);
+      } catch (_) {}
+    }
+
+    window.aiLogTogglePause = function () {
+      paused = !paused;
+      var btn = document.getElementById('ai-log-pause');
+      if (btn) btn.textContent = paused ? 'Retomar' : 'Pausar';
+    };
+
+    window.aiLogClear = function () {
+      var cons = document.getElementById('ai-console');
+      if (cons) cons.innerHTML = '';
+      total = 0;
+      lastTs = 0;
+      var cnt = document.getElementById('ai-log-count');
+      if (cnt) cnt.textContent = '';
+    };
+
+    // Detecta quando a aba de logs fica ativa
+    var logSection = document.getElementById('ailogs');
+    if (logSection) {
+      new MutationObserver(function (muts) {
+        muts.forEach(function (m) {
+          if (m.attributeName === 'class' && logSection.classList.contains('active')) {
+            lastTs = 0;
+            fetchLogs();
+          }
+        });
+      }).observe(logSection, { attributes: true });
+    }
+
+    setInterval(fetchLogs, 2000);
+  })();
+  </script>
+</body>
+</html>

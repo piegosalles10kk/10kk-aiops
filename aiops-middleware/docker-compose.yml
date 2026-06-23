@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiops_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aiops
+      POSTGRES_PASSWORD: aiops_password
+      POSTGRES_DB: aiops
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./storage/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiops -d aiops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  middleware:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aiops_middleware
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    env_file:
+      - .env
+    environment:
+      # Sobrescreve o .env: dentro do container, o Postgres é alcançado pelo
+      # nome do serviço e o GLPI (que roda em outro compose, na porta 8080 do
+      # host) é alcançado via host.docker.internal.
+      DATABASE_URL: postgresql://aiops:aiops_password@postgres:5432/aiops?schema=public
+      GLPI_API_URL: http://host.docker.internal:8080/api.php/v1
+      RUNNER_URL: http://host.docker.internal:3340
+      NODE_ENV: production
+    extra_hosts:
+      # Garante que host.docker.internal funcione também em Docker Engine Linux
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      # Monta a chave SSH do host para permitir conexão remota via ssh2
+      - ~/.ssh:/app/.ssh:ro
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: aiops_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./storage/qdrant:/qdrant/storage

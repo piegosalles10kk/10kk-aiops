@@ -1,0 +1,91 @@
+services:
+  # ==========================================================================
+  # GLPI (Sistema de Chamados)
+  # ==========================================================================
+  glpi-db:
+    image: mariadb:10.11
+    container_name: glpi_db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password_super_secreta
+      MARIADB_DATABASE: glpi
+      MARIADB_USER: glpi
+      MARIADB_PASSWORD: glpi_password
+    volumes:
+      - ./glpi-local/storage/db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "glpi", "-pglpi_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  glpi:
+    image: glpi/glpi:latest
+    container_name: glpi_app
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      TIMEZONE: America/Sao_Paulo
+    volumes:
+      - ./glpi-local/storage/glpi:/var/glpi:rw
+    depends_on:
+      glpi-db:
+        condition: service_healthy
+
+  # ==========================================================================
+  # AIOps Middleware
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiops_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aiops
+      POSTGRES_PASSWORD: aiops_password
+      POSTGRES_DB: aiops
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./aiops-middleware/storage/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiops -d aiops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  middleware:
+    build:
+      context: ./aiops-middleware
+      dockerfile: Dockerfile
+    container_name: aiops_middleware
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    env_file:
+      - ./aiops-middleware/.env
+    environment:
+      DATABASE_URL: postgresql://aiops:aiops_password@postgres:5432/aiops?schema=public
+      GLPI_API_URL: http://glpi:80/api.php/v1
+      GLPI_WEB_URL: http://localhost:8080
+      RUNNER_URL: http://host.docker.internal:3340
+      QDRANT_URL: http://qdrant:6333
+      NODE_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      glpi:
+        condition: service_started
+      qdrant:
+        condition: service_started
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: aiops_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./aiops-middleware/storage/qdrant:/qdrant/storage

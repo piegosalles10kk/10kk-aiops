@@ -1,0 +1,44 @@
+{
+  "name": "aiops-middleware",
+  "version": "1.0.0",
+  "description": "Middleware Centralizador AIOps: Grafana -> Gemini -> GLPI / Trello / Slack",
+  "type": "module",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "typecheck": "tsc --noEmit",
+    "runner": "node runner/server.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^1.9.0",
+    "@prisma/client": "^6.8.0",
+    "@slack/socket-mode": "^2.0.4",
+    "@slack/web-api": "^7.9.1",
+    "axios": "^1.9.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.0",
+    "form-data": "^4.0.1",
+    "pdfkit": "^0.19.1",
+    "pino": "^9.6.0",
+    "ssh2": "^1.17.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.15.0",
+    "@types/pdfkit": "^0.17.6",
+    "@types/ssh2": "^1.15.5",
+    "pino-pretty": "^13.0.0",
+    "prisma": "^6.8.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

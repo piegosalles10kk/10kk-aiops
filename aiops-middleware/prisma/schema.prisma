@@ -1,0 +1,439 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum IncidentStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+}
+
+model Incident {
+  id               String         @id @default(uuid()) @db.Uuid
+  grafanaAlertId   String         @unique @map("grafana_alert_id")
+  glpiTicketId     Int?           @map("glpi_ticket_id")
+  trelloCardId     String?        @map("trello_card_id")
+  status           IncidentStatus @default(OPEN)
+  aiAnalysis       Json?          @map("ai_analysis")
+  /// Nome do técnico atribuído no GLPI (espelhado no card do Trello)
+  assignedTechName String?        @map("assigned_tech_name")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  syncItems SyncItem[]
+  agentRuns AgentRun[]
+
+  @@index([status])
+  @@map("incidents")
+}
+
+enum AgentProvider {
+  OPENCODE
+  CLAUDE
+}
+
+/// Tipo de ferramenta de qualidade executada pelo Gerente.
+enum ToolKind {
+  /// Regressão visual (Playwright toHaveScreenshot)
+  VISUAL
+  /// Pentest / análise de segurança (probes HTTP + OWASP ZAP)
+  PENTEST
+  /// Teste de carga/estresse (k6)
+  LOAD
+}
+
+/// Execução de uma das 3 ferramentas de qualidade (Visual / Pentest / Stress)
+/// disparada como skill do Gerente ou pela UI. Guarda a timeline passo-a-passo,
+/// o script gerado, o relatório, os achados e o uso de tokens. Reusa
+/// AgentRunStatus para o ciclo de vida.
+model ToolRun {
+  id            String         @id @default(uuid()) @db.Uuid
+  kind          ToolKind
+  status        AgentRunStatus @default(QUEUED)
+  /// Origem do disparo: web | telegram:<id> | slack:<id> | system
+  channel       String         @default("web")
+  /// URL do alvo sob teste (configurável por execução)
+  targetUrl     String?        @map("target_url")
+  /// Caminho do repositório do alvo (relativo à raiz do runner)
+  repoPath      String?        @map("repo_path")
+  /// Parâmetros: screens / vus / duration / scenario / scope
+  params        Json?
+  /// Timeline: array de { ts, label, status, detail }
+  steps         Json           @default("[]")
+  /// Script gerado (playwright spec / k6 js / plano ZAP)
+  generatedScript String?      @map("generated_script")
+  /// Resumo curto do resultado
+  summary       String?
+  /// Relatório completo em markdown
+  report        String?
+  /// Caminho do PDF do relatório (quando gerado)
+  reportPdfPath String?        @map("report_pdf_path")
+  /// Achados estruturados (pentest: findings com severidade; load: métricas)
+  findings      Json?
+  /// stdout bruto da execução
+  output        String?
+  error         String?
+  /// ID da execução no runner (para cancelamento)
+  runnerRunId   String?        @map("runner_run_id")
+  promptTokens  Int            @default(0) @map("prompt_tokens")
+  outputTokens  Int            @default(0) @map("output_tokens")
+  totalTokens   Int            @default(0) @map("total_tokens")
+  durationMs    Int?           @map("duration_ms")
+  startedAt     DateTime?      @map("started_at")
+  finishedAt    DateTime?      @map("finished_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  @@index([kind, createdAt])
+  @@map("tool_runs")
+}
+
+enum AgentMode {
+  ANALYZE
+  EXECUTE
+  REPORT
+  AUDIT
+}
+
+enum AgentRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+  CANCELLED
+}
+
+/// Tela personalizada (webview) que aparece na barra lateral apontando para
+/// um site externo — Grafana, GLPI, Trello etc. Gerenciada em Configurações.
+model CustomView {
+  id        String   @id @default(uuid()) @db.Uuid
+  label     String
+  url       String
+  /// Emoji ou 1–2 caracteres usados como ícone na barra lateral
+  icon      String?
+  position  Int      @default(0)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("custom_views")
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  secret    Boolean  @default(false)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+model Agent {
+  id           String        @id @default(uuid()) @db.Uuid
+  name         String
+  description  String?
+  provider     AgentProvider
+  mode         AgentMode
+  projectPath  String        @map("project_path")
+  instructions String        @default("")
+  model        String?
+  enabled      Boolean       @default(true)
+  glpiUserId   Int?          @unique @map("glpi_user_id")
+  glpiUsername String?       @map("glpi_username")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  runs         AgentRun[]
+  approvals    AgentApproval[]
+
+  @@map("agents")
+}
+
+model AgentRun {
+  id           String         @id @default(uuid()) @db.Uuid
+  agentId      String         @map("agent_id") @db.Uuid
+  agent        Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  incidentId   String?        @map("incident_id") @db.Uuid
+  incident     Incident?      @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  glpiTicketId Int?           @map("glpi_ticket_id")
+  glpiTaskId   Int?           @map("glpi_task_id")
+  kind         String
+  prompt       String
+  status       AgentRunStatus @default(QUEUED)
+  output       String?
+  error        String?
+  exitCode     Int?           @map("exit_code")
+  durationMs   Int?           @map("duration_ms")
+  /// Execução rodou com permissões elevadas (aprovação concedida)?
+  elevated     Boolean        @default(false)
+  /// ID da execução no runner (para cancelamento)
+  runnerRunId  String?        @map("runner_run_id")
+  startedAt    DateTime?      @map("started_at")
+  finishedAt   DateTime?      @map("finished_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  approvals    AgentApproval[]
+
+  @@index([agentId, createdAt])
+  @@index([glpiTicketId])
+  @@map("agent_runs")
+}
+
+enum ApprovalStatus {
+  PENDING
+  GRANTED
+  DENIED
+}
+
+/// Pedido de aprovação quando um agente é bloqueado por falta de permissão
+/// dentro do CLI. Fica PENDING até o usuário aprovar/negar pelo chat,
+/// Telegram ou pelo próprio chamado no GLPI.
+model AgentApproval {
+  id           String         @id @default(uuid()) @db.Uuid
+  agentId      String         @map("agent_id") @db.Uuid
+  agent        Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runId        String?        @map("run_id") @db.Uuid
+  run          AgentRun?      @relation(fields: [runId], references: [id], onDelete: SetNull)
+  glpiTicketId Int            @map("glpi_ticket_id")
+  /// Resumo do que o agente precisa de permissão para fazer
+  summary      String
+  /// Trecho do output que motivou o pedido
+  detail       String?
+  status       ApprovalStatus @default(PENDING)
+  resolvedBy   String?        @map("resolved_by")
+  resolvedAt   DateTime?      @map("resolved_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  @@index([glpiTicketId, status])
+  @@index([status])
+  @@map("agent_approvals")
+}
+
+enum TicketPlanStatus {
+  /// Em elaboração/revisão com o usuário
+  DRAFT
+  /// Confirmado e gravado no GLPI
+  CONFIRMED
+  /// Descartado pelo usuário
+  CANCELLED
+}
+
+/// Plano de chamados (lote de requisições) proposto pelo Gerente.
+/// Fica em DRAFT durante a conversa; só vira chamados no GLPI após
+/// confirmação explícita do usuário (plan_confirm).
+model TicketPlan {
+  id               String           @id @default(uuid()) @db.Uuid
+  channel          String
+  goal             String
+  /// Itens do plano: ordem, título, descrição, critérios de aceite,
+  /// prioridade, dependências (ordens) e responsável sugerido
+  items            Json
+  status           TicketPlanStatus @default(DRAFT)
+  /// Ids dos chamados GLPI criados na confirmação (ordem -> ticketId)
+  createdTicketIds Json?            @map("created_ticket_ids")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  @@index([channel, status])
+  @@map("ticket_plans")
+}
+
+/// Associa um chamado ao canal/sessão que o "dono" — usado para enviar
+/// pedidos de aprovação só para quem iniciou (telegram:<id>, slack:<id>, web).
+model TicketChannel {
+  glpiTicketId Int      @id @map("glpi_ticket_id")
+  channel      String
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("ticket_channels")
+}
+
+/// Conta GLPI vinculada a uma sessão de chat (Telegram/Slack). A pessoa daquele
+/// chat vira um técnico no GLPI: recebe avisos dos chamados atribuídos a ela e
+/// pode atualizá-los (comentar, anexar, finalizar) pelo próprio chat.
+model ChatAccount {
+  id           String   @id @default(uuid()) @db.Uuid
+  channel      String   @unique
+  glpiUserId   Int      @map("glpi_user_id")
+  glpiUsername String   @map("glpi_username")
+  displayName  String?  @map("display_name")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([glpiUserId])
+  @@map("chat_accounts")
+}
+
+/// Marca que um chamado já foi anunciado a um chat (evita avisar repetido) e
+/// serve como lista de "meus chamados" daquela sessão.
+model ChatTicketLink {
+  glpiTicketId Int       @map("glpi_ticket_id")
+  channel      String
+  ticketName   String?   @map("ticket_name")
+  /// Última vez que o Gerente cobrou atualização desta pessoa neste chamado
+  lastNudgeAt  DateTime? @map("last_nudge_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@id([glpiTicketId, channel])
+  @@index([channel])
+  @@map("chat_ticket_links")
+}
+
+model ManagerMessage {
+  id        String   @id @default(uuid()) @db.Uuid
+  channel   String
+  role      String
+  content   String
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([channel, createdAt])
+  @@map("manager_messages")
+}
+
+/// Pergunta enviada por um gestor a um técnico pelos canais vinculados.
+/// A próxima resposta do técnico é encaminhada ao canal que originou o pedido.
+model ManagerRequest {
+  id               String    @id @default(uuid()) @db.Uuid
+  requesterChannel String    @map("requester_channel")
+  targetGlpiUserId Int       @map("target_glpi_user_id")
+  targetUsername   String    @map("target_username")
+  targetName       String    @map("target_name")
+  question         String
+  ticketId         Int?      @map("ticket_id")
+  status           String    @default("PENDING")
+  response         String?
+  answeredChannel  String?   @map("answered_channel")
+  answeredAt       DateTime? @map("answered_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([targetGlpiUserId, status, createdAt])
+  @@index([requesterChannel, createdAt])
+  @@map("manager_requests")
+}
+
+/// Registro de uso de tokens das chamadas à API do Gemini (Gerente, análise
+/// de incidentes, embeddings). Base da tela de Consumo.
+model TokenUsage {
+  id           String   @id @default(uuid()) @db.Uuid
+  model        String
+  /// Origem do uso: "manager" | "incident" | "embedding"
+  feature      String
+  /// Agente associado (quando o uso veio de um fluxo ligado a um agente)
+  agentId      String?  @map("agent_id") @db.Uuid
+  promptTokens Int      @default(0) @map("prompt_tokens")
+  outputTokens Int      @default(0) @map("output_tokens")
+  totalTokens  Int      @default(0) @map("total_tokens")
+  costUsd      Float    @default(0) @map("cost_usd")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([model])
+  @@index([feature])
+  @@map("token_usage")
+}
+
+enum CodebaseProjectStatus {
+  PENDING
+  ANALYZING
+  COMPLETED
+  FAILED
+}
+
+/// Projeto/codebase registrado para análise via OpenCode
+model CodebaseProject {
+  id            String                 @id @default(uuid()) @db.Uuid
+  name          String
+  projectPath   String                 @map("project_path")
+  description   String?
+
+  /// SSH — conexão remota para diagnóstico e execução de comandos
+  sshHost       String?                @map("ssh_host")
+  sshPort       Int                    @default(22) @map("ssh_port")
+  sshUser       String?                @map("ssh_user")
+  /// "key" | "password" | "pm2" — pm2 = executa localmente via runner
+  sshAuthType   String?                @default("pm2") @map("ssh_auth_type")
+  /// Caminho da chave privada no servidor (usado quando authType = "key")
+  sshKeyPath    String?                @map("ssh_key_path")
+  /// Senha criptografada ou em texto (usado quando authType = "password")
+  sshPassword   String?                @map("ssh_password")
+  /// true se o último teste de conexão foi bem-sucedido
+  sshConnected  Boolean                @default(false) @map("ssh_connected")
+
+  /// Instruções do fluxo de execução do agente para este projeto
+  instructions  String?
+
+  /// JSON: { technology, features, architecture } — descrição textual
+
+  /// JSON: { technology, features, architecture } — descrição textual
+  overview      Json?                  @map("overview")
+  /// JSON: { architecture, security, performance, technology, readability, monitoring, updateSupport } — notas 0-10
+  scores        Json?                  @map("scores")
+  /// Documentação completa gerada pela análise (markdown)
+  documentation String?
+  status        CodebaseProjectStatus  @default(PENDING)
+  error         String?
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  @@map("codebase_projects")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actor      String
+  action     String
+  entityType String?  @map("entity_type")
+  entityId   String?  @map("entity_id")
+  details    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+enum SyncKind {
+  /// Followup do GLPI <-> comentário do Trello
+  FOLLOWUP
+  /// Tarefa do GLPI <-> item de checklist do Trello
+  TASK
+  /// Documento do GLPI <-> anexo do Trello
+  ATTACHMENT
+}
+
+/// Assinatura dos erros detectados pelo scanner do Loki, usada para
+/// deduplicação por SIMILARIDADE (não abre chamado novo se já houver um
+/// incidente aberto com erro parecido no mesmo serviço).
+model LokiSignature {
+  fingerprint String   @id
+  environment String
+  service     String
+  errType     String?  @map("err_type")
+  message     String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([environment, service])
+  @@map("loki_signatures")
+}
+
+/// Mapeia um item já sincronizado entre GLPI e Trello.
+/// Evita eco: um item propagado para o outro lado não volta como novo.
+model SyncItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  incidentId String   @map("incident_id") @db.Uuid
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  kind       SyncKind
+  glpiId     Int      @map("glpi_id")
+  trelloId   String   @map("trello_id")
+  /// Último estado sincronizado de tarefas ("open" | "done") para detectar qual lado mudou
+  lastState  String?  @map("last_state")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([kind, glpiId])
+  @@unique([kind, trelloId])
+  @@index([incidentId])
+  @@map("sync_items")
+}

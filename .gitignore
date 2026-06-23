@@ -1,0 +1,82 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+**/dist/
+**/build/
+**/coverage/
+
+# Environment files and secrets
+.env
+.env.*
+*.env
+!.env.example
+**/.env
+**/.env.*
+**/*.env
+!**/.env.example
+
+# Runtime data and local storage
+storage/
+**/storage/
+glpi-local/storage/
+uploads/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Logs
+logs/
+**/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Docker and local compose overrides
+.docker/
+docker-compose.override.yml
+compose.override.yml
+
+# Prisma / generated caches
+*.db
+*.sqlite
+*.sqlite3
+
+# Reports and generated artifacts
+reports/
+*.pdf
+*.csv
+*.xlsx
+
+# OS files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PM2
+.pm2/
+dump.pm2
+
+# Test and tool caches
+.cache/
+.nyc_output/
+.eslintcache
+.turbo/
+.vite/
+playwright-report/
+test-results/
