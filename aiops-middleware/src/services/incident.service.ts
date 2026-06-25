@@ -4,6 +4,7 @@ import { alertName, type GrafanaAlert } from "../schemas/grafana.schema.js";
 import { errorSummary } from "../utils/retry.js";
 import * as gemini from "./gemini.service.js";
 import * as glpi from "./glpi.service.js";
+import * as glpiEntity from "./glpi-entity.service.js";
 import * as loki from "./loki.service.js";
 import * as slack from "./slack.service.js";
 import * as trello from "./trello.service.js";
@@ -67,7 +68,8 @@ export async function handleFiringAlert(alert: GrafanaAlert): Promise<void> {
     lokiLogs || alert.annotations.logs || alert.annotations.description,
   );
 
-  // ---- 3. Cria o ticket no GLPI ----
+  // ---- 3. Cria o ticket no GLPI (entidade resolvida por labels do alerta) ----
+  const entityId = await glpiEntity.resolveAlertEntity(alert.labels).catch(() => undefined);
   let glpiTicketId: number | null = null;
   try {
     glpiTicketId = await glpi.createTicket({
@@ -75,6 +77,7 @@ export async function handleFiringAlert(alert: GrafanaAlert): Promise<void> {
       analysis,
       alertContext: alertContextText(alert),
       urgency: alert.labels.severity === "critical" ? 5 : 4,
+      entityId,
     });
   } catch (error) {
     log.error({ err: errorSummary(error) }, "Falha ao criar ticket no GLPI");

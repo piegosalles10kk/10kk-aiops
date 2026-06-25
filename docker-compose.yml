@@ -80,6 +80,9 @@ services:
         condition: service_started
       qdrant:
         condition: service_started
+    volumes:
+      # Frontend montado do host: mudanças em public/ refletem com F5, sem rebuild
+      - ./aiops-middleware/public:/app/public:ro
 
   qdrant:
     image: qdrant/qdrant:latest

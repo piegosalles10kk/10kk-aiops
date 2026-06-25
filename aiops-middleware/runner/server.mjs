@@ -2,7 +2,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { access, constants, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -324,39 +324,132 @@ async function listTree(input) {
 }
 
 // Manifestos que identificam a raiz de um projeto/aplicação.
-const PROJECT_MANIFESTS = [
-  ["package.json", "node"],
-  ["requirements.txt", "python"], ["pyproject.toml", "python"], ["setup.py", "python"], ["Pipfile", "python"],
-  ["go.mod", "go"],
-  ["pom.xml", "java"], ["build.gradle", "java"], ["build.gradle.kts", "java"],
-  ["composer.json", "php"],
-  ["Cargo.toml", "rust"],
-  ["Gemfile", "ruby"],
+const ROOT_MANIFESTS = [
+  "package.json", "requirements.txt", "pyproject.toml", "setup.py", "Pipfile",
+  "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "composer.json",
+  "Cargo.toml", "Gemfile",
 ];
 
-async function dirManifestType(dir) {
-  for (const [file, type] of PROJECT_MANIFESTS) {
-    try { await access(path.join(dir, file), constants.R_OK); return type; } catch { /* segue */ }
+async function fileExists(p) {
+  try { await access(p, constants.R_OK); return true; } catch { return false; }
+}
+
+async function readJsonSafe(file) {
+  try {
+    const s = await stat(file);
+    if (!s.isFile() || s.size > 1_000_000) return null;
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch { return null; }
+}
+
+/** O diretório é raiz de algum projeto (tem manifesto reconhecido)? */
+async function dirHasManifest(dir) {
+  for (const file of ROOT_MANIFESTS) {
+    if (await fileExists(path.join(dir, file))) return true;
   }
   try {
     const items = await readdir(dir);
-    if (items.some((n) => n.endsWith(".csproj") || n.endsWith(".sln"))) return "dotnet";
+    if (items.some((n) => n.endsWith(".csproj") || n.endsWith(".sln"))) return true;
   } catch { /* ignora */ }
-  return null;
+  return false;
 }
 
 /**
- * Lista subprojetos (apps) dentro da pasta de um projeto. Útil quando o projeto
- * cadastrado é, na verdade, um guarda-chuva contendo várias aplicações (megarepo).
- * Procura até 2 níveis e para de descer ao encontrar um manifesto.
+ * Inspeciona um diretório e, se for raiz de um sistema/app, devolve metadados
+ * ricos (tipo, runtime, framework, package manager, linguagem, confiança e
+ * os sinais que motivaram a detecção). Devolve null se não houver manifesto.
+ */
+async function detectComponent(dir, relPath) {
+  let names = [];
+  try { names = await readdir(dir); } catch { return null; }
+  const has = (n) => names.includes(n);
+  const detectedBy = [];
+  const metadata = {};
+  let type = null, runtime, framework, packageManager, language, confidence = 0;
+
+  const pkg = has("package.json") ? await readJsonSafe(path.join(dir, "package.json")) : null;
+  if (pkg) {
+    detectedBy.push("package.json");
+    runtime = "node";
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    const dep = (n) => Object.prototype.hasOwnProperty.call(deps, n);
+    language = (dep("typescript") || has("tsconfig.json")) ? "typescript" : "javascript";
+    metadata.scripts = pkg.scripts ? Object.keys(pkg.scripts) : [];
+    if (dep("next")) { type = "FRONTEND"; framework = "next"; confidence = 0.9; }
+    else if (dep("@angular/core")) { type = "FRONTEND"; framework = "angular"; confidence = 0.88; }
+    else if (dep("react") || dep("vue") || dep("svelte") || dep("vite")) {
+      type = "FRONTEND"; framework = dep("react") ? "react" : dep("vue") ? "vue" : dep("svelte") ? "svelte" : "vite"; confidence = 0.85;
+    } else if (dep("@nestjs/core")) { type = "BACKEND_API"; framework = "nestjs"; confidence = 0.9; }
+    else if (dep("express") || dep("fastify") || dep("koa") || dep("@hapi/hapi")) {
+      type = "BACKEND_API"; framework = dep("express") ? "express" : dep("fastify") ? "fastify" : dep("koa") ? "koa" : "hapi"; confidence = 0.88;
+    } else if (dep("bullmq") || dep("bull") || dep("amqplib") || dep("kafkajs")) {
+      type = "WORKER"; framework = dep("bullmq") || dep("bull") ? "bull" : dep("amqplib") ? "amqp" : "kafka"; confidence = 0.8;
+    } else { type = "UNKNOWN"; confidence = 0.5; }
+    packageManager = has("pnpm-lock.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : has("bun.lockb") ? "bun" : "npm";
+    if (has("prisma")) { detectedBy.push("prisma"); if (type === "BACKEND_API") confidence = Math.min(0.97, confidence + 0.05); }
+  } else if (has("go.mod")) {
+    detectedBy.push("go.mod"); runtime = "go"; language = "go"; type = "BACKEND_API"; confidence = 0.8;
+  } else if (has("pyproject.toml") || has("requirements.txt") || has("setup.py") || has("Pipfile")) {
+    detectedBy.push("python"); runtime = "python"; language = "python"; type = "SCRIPT"; confidence = 0.6;
+    const reqText = has("requirements.txt") ? await readFile(path.join(dir, "requirements.txt"), "utf8").catch(() => "") : "";
+    if (/fastapi|flask|django|uvicorn/i.test(reqText)) { type = "BACKEND_API"; confidence = 0.78; }
+    else if (/torch|transformers|langchain|openai|llama/i.test(reqText)) { type = "AI_SERVICE"; confidence = 0.72; }
+  } else if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts")) {
+    detectedBy.push("java"); runtime = "jvm"; language = "java"; type = "BACKEND_API"; confidence = 0.7;
+  } else if (has("composer.json")) {
+    detectedBy.push("composer.json"); runtime = "php"; language = "php"; type = "BACKEND_API"; confidence = 0.7;
+  } else if (has("Cargo.toml")) {
+    detectedBy.push("Cargo.toml"); runtime = "rust"; language = "rust"; type = "BACKEND_API"; confidence = 0.65;
+  } else if (has("Gemfile")) {
+    detectedBy.push("Gemfile"); runtime = "ruby"; language = "ruby"; type = "BACKEND_API"; confidence = 0.65;
+  } else if (names.some((n) => n.endsWith(".csproj") || n.endsWith(".sln"))) {
+    detectedBy.push("dotnet"); runtime = "dotnet"; language = "csharp"; type = "BACKEND_API"; confidence = 0.7;
+  } else {
+    return null;
+  }
+
+  // Sinais de diretório reforçam o tipo
+  if (has("src")) {
+    try {
+      const srcNames = await readdir(path.join(dir, "src"));
+      if (srcNames.includes("routes") || srcNames.includes("controllers")) {
+        if (type === "UNKNOWN" || type === "BACKEND_API") { type = "BACKEND_API"; detectedBy.push("src/routes"); confidence = Math.min(0.95, confidence + 0.05); }
+      }
+      if (srcNames.includes("workers")) detectedBy.push("src/workers");
+    } catch { /* ignora */ }
+  }
+  if (has("Dockerfile")) { detectedBy.push("Dockerfile"); metadata.hasDockerfile = true; confidence = Math.min(0.98, confidence + 0.03); }
+
+  const base = relPath.split("/").pop();
+  return {
+    name: base,
+    relativePath: relPath,
+    path: relPath, // compat
+    slug: base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
+    type, runtime, framework, packageManager, language,
+    confidence: Number(confidence.toFixed(2)),
+    detectedBy, metadata,
+  };
+}
+
+/**
+ * Lista subprojetos/componentes (apps) dentro da pasta de um projeto, com
+ * metadados ricos. Para de descer ao encontrar um manifesto. Ignora pastas
+ * pesadas/sensíveis (node_modules, .git, dist…). Resolve symlinks e confina
+ * tudo dentro de PROJECTS_HOST_ROOT.
  */
 async function listSubprojects(input) {
   const root = safeWorkspace(input.projectPath);
-  const rootType = await dirManifestType(root);
-  const subprojects = [];
+  const realRoot = await realpath(root).catch(() => root);
+  if (realRoot !== workspaceRoot && !realRoot.startsWith(`${workspaceRoot}${path.sep}`)) {
+    throw new Error("projectPath fora da raiz permitida");
+  }
+  const maxDepth = Math.min(Math.max(Number(input.maxDepth ?? 3), 1), 4);
+  const rootHasManifest = await dirHasManifest(root);
+  const components = [];
 
   async function walk(dir, relParts, depth) {
-    if (subprojects.length >= 100 || depth > 2) return;
+    if (components.length >= 200 || depth > maxDepth) return;
     let items;
     try {
       items = await readdir(dir, { withFileTypes: true });
@@ -364,13 +457,13 @@ async function listSubprojects(input) {
       return;
     }
     for (const item of items) {
-      if (subprojects.length >= 100) return;
+      if (components.length >= 200) return;
       if (!item.isDirectory() || IGNORED_DIRS.has(item.name) || item.name.startsWith(".")) continue;
       const full = path.join(dir, item.name);
       const rel = [...relParts, item.name];
-      const type = await dirManifestType(full);
-      if (type) {
-        subprojects.push({ name: rel.join("/"), path: rel.join("/"), type });
+      const component = await detectComponent(full, rel.join("/"));
+      if (component) {
+        components.push(component);
       } else {
         await walk(full, rel, depth + 1);
       }
@@ -378,8 +471,30 @@ async function listSubprojects(input) {
   }
 
   await walk(root, [], 1);
-  subprojects.sort((a, b) => a.name.localeCompare(b.name));
-  return { root, rootHasManifest: Boolean(rootType), rootType, subprojects };
+  components.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+  const count = (t) => components.filter((c) => c.type === t).length;
+  const summary = {
+    totalComponents: components.length,
+    backendCount: count("BACKEND_API") + count("PAYMENT") + count("AI_SERVICE"),
+    frontendCount: count("FRONTEND"),
+    workerCount: count("WORKER"),
+    infraCount: count("INFRA"),
+    unknownCount: count("UNKNOWN"),
+  };
+
+  return {
+    projectPath: root,
+    root,
+    rootHasManifest,
+    rootType: rootHasManifest ? "root" : null,
+    isMonorepo: components.length >= 2,
+    components,
+    // compat com o seletor de subprojeto do pentest (espera subprojects[].path)
+    subprojects: components.map((c) => ({ name: c.relativePath, path: c.relativePath, type: c.type })),
+    dependencies: [],
+    summary,
+  };
 }
 
 function safeProjectFile(root, filePath) {
@@ -390,9 +505,17 @@ function safeProjectFile(root, filePath) {
   return resolved;
 }
 
+// Arquivos sensíveis (segredos/chaves) nunca devem ser lidos/retornados.
+const SENSITIVE_FILE = /(^|[\\/])(\.env(\..+)?|.*\.(pem|key|crt|p12|pfx)|id_rsa|id_ed25519|secrets\..*|credentials\..*|firebase-adminsdk.*\.json|service-account.*\.json)$/i;
+
+function isSensitiveFile(name) {
+  return SENSITIVE_FILE.test(name);
+}
+
 async function readProjectFile(input) {
   const root = safeWorkspace(input.projectPath);
   const filePath = safeProjectFile(root, input.filePath);
+  if (isSensitiveFile(filePath)) throw new Error("Leitura de arquivo sensível (segredo/chave) bloqueada");
   const stats = await stat(filePath);
   if (!stats.isFile()) throw new Error("Caminho não é um arquivo");
   if (stats.size > 1_000_000) throw new Error("Arquivo maior que 1MB");
@@ -430,7 +553,7 @@ async function searchProject(input) {
         if (!IGNORED_DIRS.has(item.name)) await walk(full, depth + 1);
         continue;
       }
-      if (!isTextFile(item.name)) continue;
+      if (!isTextFile(item.name) || isSensitiveFile(item.name)) continue;
       scanned++;
       try {
         const stats = await stat(full);

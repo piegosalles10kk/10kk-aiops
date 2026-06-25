@@ -7,7 +7,7 @@ import {
   type GenerateContentResponse,
   type Schema,
 } from "@google/genai";
-import { ApprovalStatus } from "@prisma/client";
+import { AccessSubjectType, ApprovalStatus, ProjectRole } from "@prisma/client";
 import { env } from "../config/env.js";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
@@ -16,6 +16,7 @@ import * as approval from "./approval.service.js";
 import * as chatAccounts from "./chat-account.service.js";
 import * as code from "./code.service.js";
 import * as glpi from "./glpi.service.js";
+import * as glpiEntity from "./glpi-entity.service.js";
 import * as grafana from "./grafana.service.js";
 import * as knowledge from "./knowledge.service.js";
 import * as loki from "./loki.service.js";
@@ -26,6 +27,9 @@ import * as usage from "./usage.service.js";
 import * as visualTest from "./visual-test.service.js";
 import * as pentest from "./pentest.service.js";
 import * as loadtest from "./loadtest.service.js";
+import * as projectAccess from "./project-access.service.js";
+import * as projectScope from "./project-scope.service.js";
+import * as projectTopology from "./project-topology.service.js";
 
 export interface ManagerModelOption {
   id: string;
@@ -92,6 +96,54 @@ export const managerTools = [
       type: "object",
       properties: { ticketId: { type: "number" }, text: { type: "string" } },
       required: ["ticketId", "text"],
+    },
+  },
+  {
+    name: "access_profile_list",
+    description: "Lista os perfis de acesso reutilizaveis e os grants existentes.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "access_profile_create",
+    description:
+      "Cria um perfil reutilizavel de acesso com projeto, componente/entidade filha, role, ferramentas, ambientes e regras de aprovacao.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name: { type: Type.STRING },
+        description: { type: Type.STRING },
+        projectName: { type: Type.STRING },
+        componentName: { type: Type.STRING },
+        role: { type: Type.STRING },
+        inheritChildren: { type: Type.BOOLEAN },
+        allowedTools: { type: Type.ARRAY, items: { type: Type.STRING } },
+        deniedTools: { type: Type.ARRAY, items: { type: Type.STRING } },
+        allowedEnvironments: { type: Type.ARRAY, items: { type: Type.STRING } },
+        requiresApprovalFor: { type: Type.ARRAY, items: { type: Type.STRING } },
+      },
+      required: ["name", "projectName"],
+    },
+  },
+  {
+    name: "access_profile_apply",
+    description: "Aplica um perfil de acesso a um canal, usuario GLPI, agente ou usuario web.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        profileName: { type: Type.STRING },
+        subjectType: { type: Type.STRING, description: "CHANNEL, GLPI_USER, AGENT ou WEB_USER" },
+        subjectKey: { type: Type.STRING },
+      },
+      required: ["profileName", "subjectType", "subjectKey"],
+    },
+  },
+  {
+    name: "access_profile_delete",
+    description: "Apaga um perfil de acesso reutilizavel pelo nome.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: { profileName: { type: Type.STRING } },
+      required: ["profileName"],
     },
   },
   {
@@ -297,7 +349,10 @@ const FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
     description:
       "Cria UM chamado avulso no GLPI com título e descrição. Use quando o usuário pedir para " +
       "abrir/criar um chamado único (ex.: registrar uma pesquisa, demanda ou problema discutido). " +
-      "Para uma SEQUÊNCIA de chamados planejados, use plan_propose/plan_confirm.",
+      "Para uma SEQUÊNCIA de chamados planejados, use plan_propose/plan_confirm. " +
+      "IMPORTANTE: Se o chamado estiver relacionado a um projeto ou componente específico, " +
+      "chame project_scope_set ANTES deste tool para que o chamado seja roteado para a " +
+      "entidade GLPI correta em vez da entidade raiz.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -498,6 +553,69 @@ const FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
         projectPath: { type: Type.STRING, description: "Novo caminho da pasta no Windows" },
       },
       required: ["projectName"],
+    },
+  },
+  {
+    name: "project_scope_get",
+    description: "Mostra o escopo ativo desta conversa (projeto, componente e ambiente). Use antes de operar para saber 'sobre o que estamos falando'.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "project_scope_set",
+    description:
+      "Define o escopo ativo da conversa: projeto, componente (sistema interno) e ambiente. " +
+      "Ex.: 'vamos falar do backend do OmniAI' → projectName=OmniAI, componentName=Server-Omni-AI. " +
+      "Se houver ambiguidade, retorna candidatos para você perguntar qual usar.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        projectName: { type: Type.STRING, description: "Nome do projeto (de project_topology_list)" },
+        componentName: { type: Type.STRING, description: "Nome/caminho do componente (opcional)" },
+        environment: { type: Type.STRING, description: "Ambiente: dev, homolog ou prod (opcional)" },
+      },
+      required: ["projectName"],
+    },
+  },
+  {
+    name: "project_topology_list",
+    description: "Lista os projetos e componentes (sistemas internos) que ESTE canal pode acessar, com o escopo ativo. Use para descobrir o que está disponível.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: { projectName: { type: Type.STRING, description: "Filtro opcional por nome do projeto" } },
+    },
+  },
+  {
+    name: "project_topology_scan",
+    description: "Escaneia a estrutura de um projeto e detecta automaticamente seus subprojetos/componentes (apps). Requer permissão de admin/maintainer. Depois use project_topology_confirm.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: { projectName: { type: Type.STRING, description: "Nome do projeto cadastrado a escanear" } },
+      required: ["projectName"],
+    },
+  },
+  {
+    name: "project_topology_confirm",
+    description: "Confirma os componentes detectados de um projeto e, opcionalmente, cria as entidades GLPI hierárquicas (pai/filhas).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        projectName: { type: Type.STRING },
+        components: {
+          type: Type.ARRAY,
+          description: "Componentes a confirmar",
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              relativePath: { type: Type.STRING, description: "Caminho relativo do componente (de project_topology_scan)" },
+              name: { type: Type.STRING },
+              enabled: { type: Type.BOOLEAN, description: "false = ignorar este componente" },
+            },
+            required: ["relativePath"],
+          },
+        },
+        createGlpiEntities: { type: Type.BOOLEAN, description: "Criar entidades GLPI pai/filhas para os componentes confirmados" },
+      },
+      required: ["projectName", "components"],
     },
   },
   {
@@ -866,6 +984,33 @@ interface ToolContext {
   userMessage: string;
   /** Anexos da mensagem atual (para anexar a chamados via ticket_attach). */
   attachments: ChatAttachment[];
+}
+
+/**
+ * Verifica permissão do canal para usar uma ferramenta no escopo informado.
+ * Retorna `{ erro }` (string amigável) quando bloqueado — o handler deve
+ * devolvê-lo ao Gerente em vez de executar. Web local/admin tem acesso amplo.
+ */
+async function guardTool(
+  ctx: ToolContext,
+  tool: string,
+  scope?: { projectId?: string | null; componentId?: string | null; environment?: string | null },
+): Promise<{ erro: string } | null> {
+  const subject = await projectAccess.getSubjectFromChannel(ctx.channel);
+  try {
+    await projectAccess.assertCanUseTool(subject, {
+      tool,
+      projectId: scope?.projectId ?? null,
+      componentId: scope?.componentId ?? null,
+      environment: scope?.environment ?? null,
+    });
+    return null;
+  } catch (error) {
+    if ((error as { code?: string }).code === "ACCESS_DENIED") {
+      return { erro: (error as Error).message };
+    }
+    throw error;
+  }
 }
 
 /** Normaliza texto para comparação de comentários (ignora espaços/caixa). */
@@ -1529,12 +1674,23 @@ async function executeManagerFunction(
       ? glpi.GLPI_TICKET_TYPE.INCIDENT
       : glpi.GLPI_TICKET_TYPE.REQUEST;
     const urgency = Math.min(Math.max(Number(args.urgencia) || 3, 1), 5);
+    const activeScope = await projectScope.getScope(ctx.channel).catch(() => null);
+    // Só resolve entidade quando há escopo real (projeto ou componente definido).
+    // getScope() sempre retorna um objeto — checar os IDs, não o objeto em si.
+    const hasRealScope = Boolean(activeScope?.activeProjectId || activeScope?.activeComponentId);
+    const entityId = hasRealScope
+      ? await glpiEntity.resolveTicketEntity({
+          projectId: activeScope!.activeProjectId,
+          componentId: activeScope!.activeComponentId,
+        })
+      : undefined;
 
     const ticketId = await glpi.createRawTicket({
       title: titulo,
       content: descricao.replace(/\n/g, "<br>"),
       urgency,
       type: tipo,
+      entityId,
     });
     // A sessão que criou vira a dona do chamado (aprovações roteadas a ela)
     await approval.setTicketOwner(ticketId, ctx.channel);
@@ -1559,13 +1715,25 @@ async function executeManagerFunction(
     }
 
     logger.info({ ticketId, tipo, channel: ctx.channel }, "Chamado criado pelo Gerente");
+    const semEntidade = !hasRealScope || entityId === 0;
     return {
       criado: true,
       ticketId,
       titulo,
       tipo: tipo === glpi.GLPI_TICKET_TYPE.INCIDENT ? "Incidente" : "Requisição",
+      ...(entityId !== undefined ? { entidadeGlpi: entityId } : {}),
+      ...(activeScope?.activeProjectName ? { escopo: activeScope } : {}),
       ...(atribuido ? { atribuido } : {}),
       ...(anexados.length ? { anexos: anexados } : {}),
+      ...(semEntidade
+        ? {
+            aviso:
+              "Chamado aberto na entidade raiz do GLPI porque nenhum escopo de projeto/componente " +
+              "estava ativo. Use project_scope_set antes de criar chamados para roteá-los à " +
+              "entidade correta (ex.: project_scope_set com projectName e componentName do componente " +
+              "relacionado ao problema).",
+          }
+        : {}),
     };
   }
 
@@ -2004,20 +2172,59 @@ async function executeManagerFunction(
     };
   }
 
-  if (name === "code_projects") return code.listProjects();
+  if (name === "code_projects") {
+    const subject = await projectAccess.getSubjectFromChannel(ctx.channel);
+    const [allProjects, allowed, activeScope] = await Promise.all([
+      code.listProjects(),
+      projectAccess.listAllowedProjects(subject),
+      projectScope.getScope(ctx.channel),
+    ]);
+    // Web/admin: lista ampla (retrocompatível). Canais: só projetos permitidos.
+    const projects = subject.type === "WEB_USER"
+      ? allProjects
+      : allProjects.filter((p) => allowed.some((a) => a.projectPath === p.projectPath));
+    const componentsByProject = await prisma.projectComponent.findMany({
+      where: { status: { in: ["DETECTED", "CONFIRMED"] }, enabled: true },
+      select: { id: true, name: true, relativePath: true, type: true, project: { select: { projectPath: true } } },
+    });
+    return {
+      activeScope: {
+        project: activeScope.activeProjectName,
+        component: activeScope.activeComponentName,
+        environment: activeScope.activeEnvironment,
+      },
+      projects: projects.map((p) => ({
+        ...p,
+        components: componentsByProject
+          .filter((c) => c.project.projectPath === p.projectPath)
+          .map((c) => ({ name: c.name, relativePath: c.relativePath, type: c.type })),
+      })),
+    };
+  }
   if (name === "code_tree") {
+    const project = await prisma.codebaseProject.findFirst({ where: { projectPath: String(args.projectPath) }, select: { id: true } });
+    const denied = await guardTool(ctx, "code_tree", { projectId: project?.id });
+    if (denied) return denied;
     return code.tree(String(args.projectPath), args.maxDepth ? Number(args.maxDepth) : undefined);
   }
   if (name === "code_read") {
+    const project = await prisma.codebaseProject.findFirst({ where: { projectPath: String(args.projectPath) }, select: { id: true } });
+    const denied = await guardTool(ctx, "code_read", { projectId: project?.id });
+    if (denied) return denied;
     return code.readFile(String(args.projectPath), String(args.filePath));
   }
   if (name === "code_search") {
+    const project = await prisma.codebaseProject.findFirst({ where: { projectPath: String(args.projectPath) }, select: { id: true } });
+    const denied = await guardTool(ctx, "code_search", { projectId: project?.id });
+    if (denied) return denied;
     return code.search(String(args.projectPath), String(args.query));
   }
   if (name === "search_knowledge") {
     const query = String(args.query ?? "");
     const limit = Math.min(Math.max(Number(args.limit) || 6, 1), 15);
-    return { results: await knowledge.searchKnowledge(query, limit) };
+    const subject = await projectAccess.getSubjectFromChannel(ctx.channel);
+    const allowed = await projectAccess.getAllowedKnowledgeScopes(subject);
+    return { results: await knowledge.searchKnowledge(query, limit, allowed) };
   }
 
   if (name === "ssh_exec") {
@@ -2031,6 +2238,13 @@ async function executeManagerFunction(
       const all = await prisma.codebaseProject.findMany({ select: { name: true } });
       return { erro: `Projeto "${projectName}" não encontrado. Projetos disponíveis: ${all.map((p) => p.name).join(", ")}` };
     }
+    const activeScope = await projectScope.getScope(ctx.channel);
+    const denied = await guardTool(ctx, "ssh_exec", {
+      projectId: project?.id ?? activeScope.activeProjectId,
+      componentId: activeScope.activeComponentId,
+      environment: activeScope.activeEnvironment,
+    });
+    if (denied) return denied;
     const target = project ?? { sshAuthType: "pm2" as const, projectPath: ".", sshHost: null, sshPort: 22, sshUser: null, sshKeyPath: null, sshPassword: null };
     const result = await ssh.execCommand(target, command, 60_000);
     const strip = (s: string) => s.replace(/\x1B\[[\d;]*[A-Za-z]/g, "").replace(/\r/g, "").trim();
@@ -2056,6 +2270,8 @@ async function executeManagerFunction(
       const all = await prisma.codebaseProject.findMany({ select: { name: true } });
       return { erro: `Projeto "${projectName}" não encontrado. Projetos disponíveis: ${all.map((p) => p.name).join(", ")}` };
     }
+    const denied = await guardTool(ctx, "project_update", { projectId: project.id });
+    if (denied) return denied;
     const data: Record<string, unknown> = {};
     if (args.sshHost !== undefined) data.sshHost = String(args.sshHost).trim() || null;
     if (args.sshPort !== undefined) data.sshPort = Number(args.sshPort);
@@ -2070,6 +2286,13 @@ async function executeManagerFunction(
   }
 
   if (name === "visual_regression_test" || name === "pentest" || name === "load_test") {
+    const activeScope = await projectScope.getScope(ctx.channel);
+    const denied = await guardTool(ctx, name, {
+      projectId: args.projectId ? String(args.projectId) : activeScope.activeProjectId,
+      componentId: activeScope.activeComponentId,
+      environment: activeScope.activeEnvironment,
+    });
+    if (denied) return denied;
     const common = {
       channel: ctx.channel,
       targetUrl: args.targetUrl ? String(args.targetUrl) : undefined,
@@ -2094,7 +2317,189 @@ async function executeManagerFunction(
       aviso: "Teste de carga em segundo plano. Métricas e relatório na aba Ferramentas › Stress." };
   }
 
+  if (name === "project_scope_get") {
+    return projectScope.getScope(ctx.channel);
+  }
+
+  if (name === "project_scope_set") {
+    const result = await projectScope.setScope(ctx.channel, {
+      projectName: args.projectName ? String(args.projectName) : undefined,
+      componentName: args.componentName ? String(args.componentName) : undefined,
+      environment: args.environment !== undefined ? (args.environment ? String(args.environment) : null) : undefined,
+      updatedBy: ctx.channel,
+    });
+    if (!result.ok) {
+      return result.candidates
+        ? { erro: result.error, candidatos: result.candidates.map((c) => ({ nome: c.name, caminho: c.relativePath, tipo: c.type })) }
+        : { erro: result.error };
+    }
+    // Valida acesso ao componente/projeto definido (para canais restritos)
+    const subject = await projectAccess.getSubjectFromChannel(ctx.channel);
+    if (result.scope?.activeComponentId && !(await projectAccess.canAccessComponent(subject, result.scope.activeComponentId))) {
+      await projectScope.clearScope(ctx.channel, ctx.channel);
+      return { erro: "Você não possui acesso a esse componente neste canal." };
+    }
+    return { escopoAtivo: result.scope };
+  }
+
+  if (name === "project_topology_list") {
+    const subject = await projectAccess.getSubjectFromChannel(ctx.channel);
+    const allowed = await projectAccess.listAllowedProjects(subject);
+    const filter = String(args.projectName ?? "").trim().toLowerCase();
+    const projects = filter ? allowed.filter((p) => p.name.toLowerCase().includes(filter)) : allowed;
+    const detailed = await Promise.all(projects.map(async (p) => {
+      const topo = await projectTopology.listProjectTopology(p.id).catch(() => null);
+      return {
+        nome: p.name,
+        projectPath: p.projectPath,
+        isMonorepo: topo?.isMonorepo ?? false,
+        topologyStatus: topo?.topologyStatus ?? "NOT_SCANNED",
+        componentes: (topo?.components ?? [])
+          .filter((c) => p.componentIds.length === 0 || p.componentIds.includes(c.id))
+          .map((c) => ({ nome: c.name, caminho: c.relativePath, tipo: c.type, status: c.status })),
+      };
+    }));
+    return { projetos: detailed };
+  }
+
+  if (name === "project_topology_scan") {
+    const projectName = String(args.projectName ?? "").trim();
+    const project = await prisma.codebaseProject.findFirst({ where: { name: { equals: projectName, mode: "insensitive" } } });
+    if (!project) return { erro: `Projeto "${projectName}" não encontrado.` };
+    const denied = await guardTool(ctx, "project_topology_scan", { projectId: project.id });
+    if (denied) return denied;
+    const result = await projectTopology.scanProjectTopology(project.id, { actor: ctx.channel });
+    return {
+      projeto: result.projectName,
+      isMonorepo: result.isMonorepo,
+      resumo: result.summary,
+      componentes: result.components.map((c) => ({ nome: c.name, caminho: c.relativePath, tipo: c.type, confianca: c.detectionConfidence })),
+      aviso: "Componentes detectados. Revise e confirme com project_topology_confirm.",
+    };
+  }
+
+  if (name === "project_topology_confirm") {
+    const projectName = String(args.projectName ?? "").trim();
+    const project = await prisma.codebaseProject.findFirst({ where: { name: { equals: projectName, mode: "insensitive" } } });
+    if (!project) return { erro: `Projeto "${projectName}" não encontrado.` };
+    const denied = await guardTool(ctx, "project_topology_confirm", { projectId: project.id });
+    if (denied) return denied;
+    const components = Array.isArray(args.components) ? args.components as Array<Record<string, unknown>> : [];
+    if (!components.length) return { erro: "Informe os componentes a confirmar (relativePath)." };
+    await projectTopology.confirmProjectTopology(project.id, {
+      components: components.map((c) => ({
+        relativePath: String(c.relativePath ?? ""),
+        name: c.name ? String(c.name) : undefined,
+        enabled: c.enabled !== undefined ? Boolean(c.enabled) : undefined,
+      })),
+      createGlpiEntities: Boolean(args.createGlpiEntities),
+    }, { actor: ctx.channel });
+    return { confirmado: true, projeto: project.name, componentes: components.length };
+  }
+
   // Demais ferramentas compartilham a implementação do MCP
+  if (name === "access_profile_list") {
+    const denied = await guardTool(ctx, "access_profile_list");
+    if (denied) return denied;
+    const profiles = await projectAccess.listProfiles();
+    const grants = await prisma.projectAccessGrant.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      include: { project: { select: { name: true } }, component: { select: { name: true, relativePath: true } } },
+    });
+    return {
+      perfis: profiles.map((p) => ({
+        id: p.id,
+        nome: p.name,
+        descricao: p.description,
+        regras: Array.isArray(p.entries) ? p.entries.length : 0,
+      })),
+      grantsRecentes: grants.map((g) => ({
+        sujeito: `${g.subjectType}:${g.subjectKey}`,
+        projeto: g.project.name,
+        componente: g.component?.name ?? null,
+        role: g.role,
+        herdaFilhos: g.inheritChildren,
+      })),
+    };
+  }
+
+  if (name === "access_profile_create") {
+    const projectName = String(args.projectName ?? "").trim();
+    const project = await prisma.codebaseProject.findFirst({ where: { name: { equals: projectName, mode: "insensitive" } } });
+    if (!project) return { erro: `Projeto "${projectName}" nÃ£o encontrado.` };
+    const denied = await guardTool(ctx, "access_profile_create", { projectId: project.id });
+    if (denied) return denied;
+    let componentId: string | null = null;
+    const componentName = String(args.componentName ?? "").trim();
+    if (componentName) {
+      const candidates = await prisma.projectComponent.findMany({
+        where: {
+          projectId: project.id,
+          OR: [
+            { name: { contains: componentName, mode: "insensitive" } },
+            { relativePath: { contains: componentName, mode: "insensitive" } },
+          ],
+        },
+        take: 5,
+      });
+      if (candidates.length !== 1) {
+        return { erro: "Componente ambiguo ou nao encontrado.", candidatos: candidates.map((c) => ({ nome: c.name, caminho: c.relativePath })) };
+      }
+      componentId = candidates[0]!.id;
+    }
+    const roleValue = String(args.role ?? "VIEWER").toUpperCase();
+    const role = Object.values(ProjectRole).includes(roleValue as ProjectRole)
+      ? roleValue as ProjectRole
+      : ProjectRole.VIEWER;
+    const arr = (value: unknown) => Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+    const profile = await projectAccess.createProfile({
+      name: String(args.name ?? "").trim(),
+      description: args.description ? String(args.description) : null,
+      createdBy: ctx.channel,
+      entries: [{
+        projectId: project.id,
+        componentId,
+        role,
+        inheritChildren: Boolean(args.inheritChildren),
+        allowedTools: arr(args.allowedTools),
+        deniedTools: arr(args.deniedTools),
+        allowedEnvironments: arr(args.allowedEnvironments),
+        requiresApprovalFor: arr(args.requiresApprovalFor),
+      }],
+    });
+    return { criado: true, perfil: profile.name, regras: 1 };
+  }
+
+  if (name === "access_profile_apply") {
+    const denied = await guardTool(ctx, "access_profile_apply");
+    if (denied) return denied;
+    const profileName = String(args.profileName ?? "").trim();
+    const profile = await prisma.projectAccessProfile.findFirst({ where: { name: { equals: profileName, mode: "insensitive" } } });
+    if (!profile) return { erro: `Perfil "${profileName}" nÃ£o encontrado.` };
+    const subjectTypeValue = String(args.subjectType ?? "CHANNEL").toUpperCase();
+    const subjectType = Object.values(AccessSubjectType).includes(subjectTypeValue as AccessSubjectType)
+      ? subjectTypeValue as AccessSubjectType
+      : AccessSubjectType.CHANNEL;
+    const result = await projectAccess.applyProfile({
+      profileId: profile.id,
+      subjectType,
+      subjectKey: String(args.subjectKey ?? "").trim(),
+      createdBy: ctx.channel,
+    });
+    return { aplicado: true, perfil: result.profile.name, grants: result.grants.length };
+  }
+
+  if (name === "access_profile_delete") {
+    const denied = await guardTool(ctx, "access_profile_delete");
+    if (denied) return denied;
+    const profileName = String(args.profileName ?? "").trim();
+    const profile = await prisma.projectAccessProfile.findFirst({ where: { name: { equals: profileName, mode: "insensitive" } } });
+    if (!profile) return { erro: `Perfil "${profileName}" nÃ£o encontrado.` };
+    await projectAccess.deleteProfile(profile.id, ctx.channel);
+    return { apagado: true, perfil: profile.name };
+  }
+
   return callTool(name, args);
 }
 
@@ -2590,8 +2995,9 @@ export async function chat(
     "Relatos espontâneos só podem atualizar chamados atribuídos à conta GLPI da conversa. Ordens administrativas explícitas para IDs determinados, inclusive em lote, podem usar a conta técnica e não exigem atribuição prévia.",
     "",
     "## Criação de chamado avulso",
-    "Você PODE criar chamados no GLPI com ticket_create. Quando o usuário pedir UM chamado (ex.: 'crie o chamado', 'abre um chamado com essa pesquisa'), chame ticket_create imediatamente com título claro e a descrição COMPLETA do que foi discutido/produzido na conversa (inclua a pesquisa inteira, critérios e fontes — não resuma demais). Nunca diga que não consegue criar chamados.",
+    "Você PODE criar chamados no GLPI com ticket_create. Quando o usuário pedir UM chamado (ex.: 'crie o chamado', 'abre um chamado com essa pesquisa'), chame ticket_create com título claro e a descrição COMPLETA do que foi discutido/produzido na conversa (inclua a pesquisa inteira, critérios e fontes — não resuma demais). Nunca diga que não consegue criar chamados.",
     "Use tipo incidente só para problemas/falhas; demandas, pesquisas e melhorias são requisição.",
+    "ROTEAMENTO AUTOMÁTICO DE ENTIDADE: ANTES de chamar ticket_create (ou confirmar um plano com plan_confirm), você DEVE inferir a qual projeto e componente o chamado se refere — pelo título, descrição, contexto da conversa e pelo seu conhecimento do código (code_tree/code_search se necessário). Use project_topology_list para ver os projetos/componentes disponíveis. Quando identificar o componente correto, chame project_scope_set com projectName e componentName ANTES de criar o chamado. Você não precisa perguntar ao usuário — infira pelo conteúdo. Exemplo: chamado sobre 'Loki Querier' → componente de observabilidade/infraestrutura → project_scope_set → ticket_create. Só abra na entidade raiz se realmente não for possível identificar um componente relacionado.",
     "",
     "## Plano de chamados (lote de requisições)",
     "Quando o usuário pedir para planejar um objetivo (ex.: 'precisamos implantar SSO, planeje os chamados'):",
@@ -2605,6 +3011,15 @@ export async function chat(
     "7. SOMENTE quando o usuário aprovar explicitamente na mensagem atual, chame plan_confirm.",
     "8. Após confirmar, informe os números dos chamados criados.",
     "NUNCA chame plan_confirm sem aprovação explícita — a ferramenta bloqueia e devolve erro.",
+    "",
+    "## Escopo de projeto e permissões",
+    "Você opera com ESCOPO de projeto. Projetos podem ser monorepos com vários componentes (sistemas internos): use project_topology_list para ver o que ESTE canal pode acessar e project_scope_get/set para definir 'sobre o que estamos falando agora' (projeto + componente + ambiente).",
+    "Antes de consultar código, logs, métricas, RAG ou rodar ferramentas, considere o escopo ativo do canal e as permissões do usuário. Nunca exponha dados de projetos/componentes fora do escopo permitido.",
+    "Quando criar chamado com ticket_create ou confirmar um plano de chamados, o sistema usa o escopo ativo para abrir no GLPI: componente ativo → entidade filha correta; sem componente → entidade do projeto; sem entidade → raiz. SEMPRE defina project_scope_set antes de criar chamados, inferindo o componente pelo conteúdo — veja a seção 'Criação de chamado avulso'.",
+    "Permissões também são operadas pelo chat. Para listar, criar, aplicar ou apagar perfis de acesso, use access_profile_list, access_profile_create, access_profile_apply e access_profile_delete. Prefira perfis reutilizáveis quando o usuário falar em dar acesso a um conjunto de entidades, filhos, SSH, ferramentas ou ambientes.",
+    "Se o pedido for ambíguo (ex.: 'veja o backend' e houver vários), pergunte qual componente usar. Se o usuário pedir acesso a um componente sem permissão, explique que não tem acesso neste canal e ofereça abrir um chamado de solicitação de acesso — não vaze nomes de projetos proibidos.",
+    "Ferramentas perigosas (ssh_exec, pentest/load_test em produção, project_update, execução elevada de agentes) exigem permissão explícita e, quando configurado, aprovação humana. Se uma ferramenta retornar um campo 'erro' de acesso negado, explique o bloqueio com clareza em vez de insistir.",
+    "Para descobrir os componentes de um projeto recém-cadastrado, use project_topology_scan (detecção automática) e depois project_topology_confirm para confirmar e, se quiser, criar as entidades GLPI.",
     "",
     "## Código-fonte (sempre atualizado)",
     "Você tem acesso de LEITURA ao código-fonte real dos projetos via code_projects, code_tree, code_read e code_search.",

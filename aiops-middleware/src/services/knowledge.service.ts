@@ -2,6 +2,7 @@ import axios from "axios";
 import { GoogleGenAI, JobState } from "@google/genai";
 import { env } from "../config/env.js";
 import { logger } from "../lib/logger.js";
+import { prisma } from "../lib/prisma.js";
 import { errorSummary } from "../utils/retry.js";
 import * as glpi from "./glpi.service.js";
 import * as usage from "./usage.service.js";
@@ -83,6 +84,20 @@ async function embedding(text: string): Promise<number[]> {
   return response.embeddings?.[0]?.values ?? [];
 }
 
+/** Resolve o escopo (projeto/componente) de um chamado pelo incidente vinculado. */
+async function ticketScope(ticketId: number): Promise<{ projectId: string | null; componentId: string | null }> {
+  try {
+    const incident = await prisma.incident.findFirst({
+      where: { glpiTicketId: ticketId },
+      select: { projectId: true, componentId: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return { projectId: incident?.projectId ?? null, componentId: incident?.componentId ?? null };
+  } catch {
+    return { projectId: null, componentId: null };
+  }
+}
+
 async function ensureCollection(size: number): Promise<void> {
   try {
     await axios.get(`${env.QDRANT_URL}/collections/${collection}`, { timeout: 5_000 });
@@ -121,11 +136,15 @@ export async function indexRecentTickets(): Promise<number> {
       const vector = vectors?.[i] ?? (await embedding(item.context));
       if (!vector.length) continue;
       await ensureCollection(vector.length);
+      const scope = await ticketScope(item.id);
       await axios.put(`${env.QDRANT_URL}/collections/${collection}/points`, {
         points: [{
           id: item.id,
           vector,
-          payload: { ticketId: item.id, name: item.name, status: item.status, context: item.context },
+          payload: {
+            ticketId: item.id, name: item.name, status: item.status, context: item.context,
+            sourceType: "ticket", projectId: scope.projectId, componentId: scope.componentId,
+          },
         }],
       }, { params: { wait: true }, timeout: 15_000 });
       indexed++;
@@ -148,6 +167,7 @@ export async function indexTicket(ticketId: number): Promise<boolean> {
     if (!vector.length) return false;
     await ensureCollection(vector.length);
     const ticket = await glpi.getTicket(ticketId);
+    const scope = await ticketScope(ticketId);
     await axios.put(`${env.QDRANT_URL}/collections/${collection}/points`, {
       points: [{
         id: ticketId,
@@ -157,6 +177,9 @@ export async function indexTicket(ticketId: number): Promise<boolean> {
           name: ticket?.name ?? `Chamado #${ticketId}`,
           status: ticket?.status ?? 0,
           context,
+          sourceType: "ticket",
+          projectId: scope.projectId,
+          componentId: scope.componentId,
         },
       }],
     }, { params: { wait: true }, timeout: 15_000 });
@@ -172,16 +195,39 @@ export async function indexTicket(ticketId: number): Promise<boolean> {
 }
 
 
-export async function searchKnowledge(query: string, limit = 6): Promise<string[]> {
+export interface KnowledgeScope {
+  /** null = sem restrição (web/admin). Lista vazia = sem acesso a nada escopado. */
+  projectIds?: string[] | null;
+  componentIds?: string[] | null;
+}
+
+/**
+ * Monta o filtro do Qdrant a partir do escopo permitido. Conhecimento legado
+ * (sem projectId) permanece visível para não quebrar o uso atual; pontos
+ * escopados só aparecem se o projeto estiver na lista permitida.
+ */
+export function buildScopeFilter(scope?: KnowledgeScope): Record<string, unknown> | undefined {
+  if (!scope || scope.projectIds == null) return undefined; // acesso amplo
+  return {
+    should: [
+      { is_empty: { key: "projectId" } },
+      ...(scope.projectIds.length ? [{ key: "projectId", match: { any: scope.projectIds } }] : []),
+    ],
+  };
+}
+
+export async function searchKnowledge(query: string, limit = 6, scope?: KnowledgeScope): Promise<string[]> {
   try {
     const vector = await embedding(query);
     if (!vector.length) return [];
+    const filter = buildScopeFilter(scope);
     const { data } = await axios.post<{
       result?: Array<{ payload?: { context?: string } }>;
     }>(`${env.QDRANT_URL}/collections/${collection}/points/search`, {
       vector,
       limit,
       with_payload: true,
+      ...(filter ? { filter } : {}),
     }, { timeout: 15_000 });
     const results = (data.result ?? []).map((item) => item.payload?.context).filter(Boolean) as string[];
     logger.info(

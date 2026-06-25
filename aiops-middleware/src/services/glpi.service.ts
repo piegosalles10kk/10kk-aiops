@@ -80,6 +80,27 @@ async function withSession<T>(fn: (token: string) => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Chamada genérica autenticada ao GLPI (reuso por outros serviços, ex.: entidades).
+ * Renova a sessão automaticamente em 401. Retorna o corpo da resposta.
+ */
+export async function glpiRequest<T = unknown>(
+  method: "get" | "post" | "put" | "delete",
+  path: string,
+  options: { params?: Record<string, unknown>; data?: unknown } = {},
+): Promise<T> {
+  return withSession(async (token) => {
+    const { data } = await http.request<T>({
+      method,
+      url: path,
+      headers: { "Session-Token": token },
+      params: options.params,
+      data: options.data,
+    });
+    return data;
+  });
+}
+
 function buildTicketContent(analysis: AiAnalysis, alertContext: string): string {
   // GLPI renderiza HTML no campo content
   return [
@@ -97,6 +118,7 @@ export interface CreateTicketInput {
   title: string;
   analysis: AiAnalysis;
   alertContext: string;
+  entityId?: number;
   /** 1=muito baixa ... 5=muito alta (urgência GLPI). */
   urgency?: number;
 }
@@ -111,6 +133,7 @@ export async function createRawTicket(input: {
   urgency?: number;
   /** 1 = Incidente (default), 2 = Requisição. */
   type?: number;
+  entityId?: number;
 }): Promise<number> {
   return withRetry(
     () =>
@@ -124,6 +147,7 @@ export async function createRawTicket(input: {
               urgency: input.urgency ?? 3,
               status: GLPI_TICKET_STATUS.NEW,
               type: input.type ?? GLPI_TICKET_TYPE.INCIDENT,
+              ...(input.entityId !== undefined ? { entities_id: input.entityId } : {}),
             },
           },
           { headers: { "Session-Token": token } },
@@ -152,6 +176,7 @@ export async function createTicket(input: CreateTicketInput): Promise<number> {
     title: input.title,
     content: buildTicketContent(input.analysis, input.alertContext),
     urgency: input.urgency ?? 4,
+    entityId: input.entityId,
   });
 }
 

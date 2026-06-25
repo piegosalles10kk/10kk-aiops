@@ -6,6 +6,7 @@ import { healthRouter } from "./routes/health.routes.js";
 import { webhookRouter } from "./routes/webhook.routes.js";
 import { commandCenterRouter } from "./routes/command-center.routes.js";
 import { toolsRouter } from "./routes/tools.routes.js";
+import { projectRouter } from "./routes/project.routes.js";
 import { embedRouter } from "./routes/embed.routes.js";
 
 export function createApp(): express.Express {
@@ -23,6 +24,8 @@ export function createApp(): express.Express {
   app.use("/", healthRouter);
   app.use("/webhooks", webhookRouter);
   app.use("/api/tools", toolsRouter);
+  // Rotas novas de topologia/escopo/permissões antes do command-center (sem colisão de paths)
+  app.use("/api", projectRouter);
   app.use("/api", commandCenterRouter);
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
   app.use(express.static(publicDir));

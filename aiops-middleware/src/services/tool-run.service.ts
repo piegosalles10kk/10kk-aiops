@@ -237,12 +237,43 @@ export async function cancel(runId: string): Promise<boolean> {
 }
 
 export interface Subproject { name: string; path: string; type: string }
-export interface SubprojectScan { root: string; rootHasManifest: boolean; rootType: string | null; subprojects: Subproject[] }
+
+/** Componente detectado pelo runner, com metadados ricos. */
+export interface DetectedComponent {
+  name: string;
+  relativePath: string;
+  path?: string;
+  slug?: string;
+  type: string;
+  runtime?: string | null;
+  framework?: string | null;
+  packageManager?: string | null;
+  language?: string | null;
+  confidence: number;
+  detectedBy: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface SubprojectScan {
+  root: string;
+  projectPath?: string;
+  rootHasManifest: boolean;
+  rootType: string | null;
+  isMonorepo?: boolean;
+  components?: DetectedComponent[];
+  /** Compat: projeção simples usada pelo seletor de subprojeto do pentest. */
+  subprojects: Subproject[];
+  dependencies?: unknown[];
+  summary?: Record<string, number>;
+}
 
 /** Detecta subprojetos (apps) dentro de uma pasta, via runner do host (local). */
-export async function detectSubprojects(projectPath: string): Promise<SubprojectScan> {
+export async function detectSubprojects(projectPath: string, maxDepth?: number): Promise<SubprojectScan> {
+  // Normaliza para barras "/": o runner (Windows) resolve corretamente e evita
+  // qualquer ambiguidade de escape de "\" ao trafegar em JSON/HTTP.
+  const normalized = projectPath.replace(/\\/g, "/");
   const res = await axios.post<SubprojectScan>(`${env.RUNNER_URL}/fs/subprojects`,
-    { projectPath }, { timeout: 30_000, headers: runnerHeaders });
+    { projectPath: normalized, ...(maxDepth ? { maxDepth } : {}) }, { timeout: 30_000, headers: runnerHeaders });
   return res.data;
 }
 

@@ -22,6 +22,11 @@ model Incident {
   aiAnalysis       Json?          @map("ai_analysis")
   /// Nome do técnico atribuído no GLPI (espelhado no card do Trello)
   assignedTechName String?        @map("assigned_tech_name")
+  /// Escopo de topologia (opcional, retrocompatível)
+  projectId        String?        @map("project_id") @db.Uuid
+  componentId      String?        @map("component_id") @db.Uuid
+  environment      String?
+  correlationId    String?        @map("correlation_id")
   createdAt        DateTime       @default(now()) @map("created_at")
   updatedAt        DateTime       @updatedAt @map("updated_at")
 
@@ -29,6 +34,8 @@ model Incident {
   agentRuns AgentRun[]
 
   @@index([status])
+  @@index([projectId, componentId])
+  @@index([correlationId])
   @@map("incidents")
 }
 
@@ -84,11 +91,17 @@ model ToolRun {
   outputTokens  Int            @default(0) @map("output_tokens")
   totalTokens   Int            @default(0) @map("total_tokens")
   durationMs    Int?           @map("duration_ms")
+  /// Escopo de topologia (opcional, retrocompatível)
+  projectId     String?        @map("project_id") @db.Uuid
+  componentId   String?        @map("component_id") @db.Uuid
+  correlationId String?        @map("correlation_id")
   startedAt     DateTime?      @map("started_at")
   finishedAt    DateTime?      @map("finished_at")
   createdAt     DateTime       @default(now()) @map("created_at")
 
   @@index([kind, createdAt])
+  @@index([projectId, componentId])
+  @@index([correlationId])
   @@map("tool_runs")
 }
 
@@ -145,6 +158,11 @@ model Agent {
   enabled      Boolean       @default(true)
   glpiUserId   Int?          @unique @map("glpi_user_id")
   glpiUsername String?       @map("glpi_username")
+  /// Escopo de topologia (opcional, retrocompatível)
+  projectId    String?       @map("project_id") @db.Uuid
+  componentId  String?       @map("component_id") @db.Uuid
+  /// Ferramentas permitidas para este agente (allow-list opcional)
+  allowedTools Json?         @map("allowed_tools")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
   runs         AgentRun[]
@@ -172,6 +190,10 @@ model AgentRun {
   elevated     Boolean        @default(false)
   /// ID da execução no runner (para cancelamento)
   runnerRunId  String?        @map("runner_run_id")
+  /// Escopo de topologia (opcional, retrocompatível)
+  projectId    String?        @map("project_id") @db.Uuid
+  componentId  String?        @map("component_id") @db.Uuid
+  correlationId String?       @map("correlation_id")
   startedAt    DateTime?      @map("started_at")
   finishedAt   DateTime?      @map("finished_at")
   createdAt    DateTime       @default(now()) @map("created_at")
@@ -180,6 +202,8 @@ model AgentRun {
 
   @@index([agentId, createdAt])
   @@index([glpiTicketId])
+  @@index([projectId, componentId])
+  @@index([correlationId])
   @@map("agent_runs")
 }
 
@@ -235,6 +259,9 @@ model TicketPlan {
   status           TicketPlanStatus @default(DRAFT)
   /// Ids dos chamados GLPI criados na confirmação (ordem -> ticketId)
   createdTicketIds Json?            @map("created_ticket_ids")
+  /// Escopo de topologia (opcional, retrocompatível)
+  projectId        String?          @map("project_id") @db.Uuid
+  componentId      String?          @map("component_id") @db.Uuid
   createdAt        DateTime         @default(now()) @map("created_at")
   updatedAt        DateTime         @updatedAt @map("updated_at")
 
@@ -328,11 +355,17 @@ model TokenUsage {
   outputTokens Int      @default(0) @map("output_tokens")
   totalTokens  Int      @default(0) @map("total_tokens")
   costUsd      Float    @default(0) @map("cost_usd")
+  /// Escopo de topologia + canal (opcional, retrocompatível)
+  projectId    String?  @map("project_id") @db.Uuid
+  componentId  String?  @map("component_id") @db.Uuid
+  channel      String?
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([createdAt])
   @@index([model])
   @@index([feature])
+  @@index([projectId, componentId])
+  @@index([channel])
   @@map("token_usage")
 }
 
@@ -349,6 +382,18 @@ model CodebaseProject {
   name          String
   projectPath   String                 @map("project_path")
   description   String?
+
+  /// Identificador estável e único (kebab-case) derivado do nome
+  slug               String?   @unique
+  /// true quando o projeto contém 2+ componentes/sistemas internos
+  isMonorepo         Boolean   @default(false) @map("is_monorepo")
+  /// Entidade GLPI pai associada ao projeto
+  glpiEntityId       Int?      @map("glpi_entity_id")
+  /// NOT_SCANNED | SCANNING | SCANNED | CONFIRMED | FAILED
+  topologyStatus     String    @default("NOT_SCANNED") @map("topology_status")
+  topologyLastScanAt DateTime? @map("topology_last_scan_at")
+  /// Resumo do último scan: contagens por tipo, monorepo, sinais
+  topologySummary    Json?     @map("topology_summary")
 
   /// SSH — conexão remota para diagnóstico e execução de comandos
   sshHost       String?                @map("ssh_host")
@@ -379,7 +424,201 @@ model CodebaseProject {
   createdAt     DateTime               @default(now()) @map("created_at")
   updatedAt     DateTime               @updatedAt @map("updated_at")
 
+  components    ProjectComponent[]
+  accessGrants  ProjectAccessGrant[]
+  managerScopes ManagerSessionScope[]
+
   @@map("codebase_projects")
+}
+
+/// Tipo de um componente/sistema interno detectado num projeto.
+enum ProjectComponentType {
+  BACKEND_API
+  FRONTEND
+  WORKER
+  MOBILE
+  INFRA
+  LIBRARY
+  PACKAGE
+  DOCS
+  SCRIPT
+  AGENT
+  PAYMENT
+  AI_SERVICE
+  UNKNOWN
+}
+
+/// Estado de revisão humana de um componente detectado.
+enum ProjectComponentStatus {
+  DETECTED
+  CONFIRMED
+  IGNORED
+  ARCHIVED
+}
+
+/// Tipo do sujeito que recebe permissão de acesso a projetos/componentes.
+enum AccessSubjectType {
+  CHANNEL
+  GLPI_USER
+  AGENT
+  WEB_USER
+}
+
+/// Papel/role do sujeito sobre um projeto/componente.
+enum ProjectRole {
+  VIEWER
+  OPERATOR
+  DEVELOPER
+  MAINTAINER
+  ADMIN
+  AUDITOR
+}
+
+/// Nível de risco de uma ferramenta (usado para exigir aprovação).
+enum ToolRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// Sistema interno/subprojeto detectado dentro de um CodebaseProject (monorepo).
+model ProjectComponent {
+  id        String           @id @default(uuid()) @db.Uuid
+  projectId String           @map("project_id") @db.Uuid
+  project   CodebaseProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  parentId  String?           @map("parent_id") @db.Uuid
+  parent    ProjectComponent? @relation("ComponentTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children  ProjectComponent[] @relation("ComponentTree")
+
+  name             String
+  slug             String
+  relativePath     String  @map("relative_path")
+  absolutePathHash String? @map("absolute_path_hash")
+
+  type   ProjectComponentType   @default(UNKNOWN)
+  status ProjectComponentStatus @default(DETECTED)
+
+  runtime        String?
+  framework      String?
+  packageManager String? @map("package_manager")
+  language       String?
+  mainPort       Int?    @map("main_port")
+
+  detectionConfidence Float @default(0.0) @map("detection_confidence")
+  detectedBy          Json? @map("detected_by")
+  metadata            Json?
+
+  glpiEntityId Int?    @map("glpi_entity_id")
+  ownerTeam    String? @map("owner_team")
+  riskLevel    String? @map("risk_level")
+
+  documentation String?
+  overview      Json?   @map("overview")
+
+  enabled Boolean @default(true)
+
+  dependenciesFrom ProjectComponentDependency[] @relation("ComponentDependencyFrom")
+  dependenciesTo   ProjectComponentDependency[] @relation("ComponentDependencyTo")
+  accessGrants     ProjectAccessGrant[]
+  managerScopes    ManagerSessionScope[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([projectId, relativePath])
+  @@unique([projectId, slug])
+  @@index([projectId, status])
+  @@index([glpiEntityId])
+  @@map("project_components")
+}
+
+/// Dependência (grafo) entre dois componentes do mesmo projeto.
+model ProjectComponentDependency {
+  id        String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+
+  fromComponentId String           @map("from_component_id") @db.Uuid
+  fromComponent   ProjectComponent @relation("ComponentDependencyFrom", fields: [fromComponentId], references: [id], onDelete: Cascade)
+
+  toComponentId String           @map("to_component_id") @db.Uuid
+  toComponent   ProjectComponent @relation("ComponentDependencyTo", fields: [toComponentId], references: [id], onDelete: Cascade)
+
+  kind       String @default("uses")
+  confidence Float  @default(0.5)
+  evidence   Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([fromComponentId, toComponentId, kind])
+  @@index([projectId])
+  @@map("project_component_dependencies")
+}
+
+/// Permissão granular de um sujeito (canal/usuário/agente) sobre projeto/componente.
+model ProjectAccessGrant {
+  id          String            @id @default(uuid()) @db.Uuid
+  subjectType AccessSubjectType @map("subject_type")
+  subjectKey  String            @map("subject_key")
+
+  projectId String          @map("project_id") @db.Uuid
+  project   CodebaseProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  componentId String?           @map("component_id") @db.Uuid
+  component   ProjectComponent? @relation(fields: [componentId], references: [id], onDelete: Cascade)
+
+  role ProjectRole @default(VIEWER)
+
+  inheritChildren Boolean @default(false) @map("inherit_children")
+
+  allowedTools        Json @default("[]") @map("allowed_tools")
+  deniedTools         Json @default("[]") @map("denied_tools")
+  allowedEnvironments Json @default("[]") @map("allowed_environments")
+  requiresApprovalFor Json @default("[]") @map("requires_approval_for")
+
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([subjectType, subjectKey])
+  @@index([projectId, componentId])
+  @@map("project_access_grants")
+}
+
+/// Perfil reutilizavel de acesso. Um perfil contem um conjunto de grants
+/// aplicaveis a qualquer canal, usuario GLPI, agente ou usuario web.
+model ProjectAccessProfile {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  /// Array de grants: projectId, componentId, role, inheritChildren,
+  /// allowedTools, deniedTools, allowedEnvironments, requiresApprovalFor.
+  entries     Json     @default("[]")
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("project_access_profiles")
+}
+
+/// Escopo ativo de um chat do Gerente (sobre o que estamos falando agora).
+model ManagerSessionScope {
+  channel String @id
+
+  activeProjectId String?          @map("active_project_id") @db.Uuid
+  activeProject   CodebaseProject? @relation(fields: [activeProjectId], references: [id], onDelete: SetNull)
+
+  activeComponentId String?           @map("active_component_id") @db.Uuid
+  activeComponent   ProjectComponent? @relation(fields: [activeComponentId], references: [id], onDelete: SetNull)
+
+  activeEnvironment String? @map("active_environment")
+
+  updatedBy String?  @map("updated_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("manager_session_scopes")
 }
 
 model AuditLog {

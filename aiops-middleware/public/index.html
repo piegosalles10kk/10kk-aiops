@@ -14,6 +14,7 @@
       <button data-page="manager">Gerente</button>
       <button data-page="agents">Agentes</button>
       <button data-page="projetos">Projetos</button>
+      <button data-page="acessos">Perfil de Acesso</button>
       <button data-page="consumo">Consumo</button>
       <button data-page="reports">Relatórios</button>
       <button data-page="runs">Execuções</button>
@@ -42,7 +43,7 @@
           <div id="channel-list" class="channel-list"></div>
         </div>
         <div class="panel chat-panel">
-          <div class="panel-title manager-head"><div><h2 id="chat-title">Gerente AIOps</h2><p id="chat-sub">Conversa naturalmente e usa chamados e ferramentas quando necessário</p></div><div class="manager-controls"><button id="chat-account-btn" class="ghost hidden" onclick="openChatAccount()">Configurar conta GLPI</button><button class="ghost" onclick="reindex()">Reindexar RAG</button></div></div>
+          <div class="panel-title manager-head"><div><h2 id="chat-title">Gerente AIOps</h2><p id="chat-sub">Conversa naturalmente e usa chamados e ferramentas quando necessário</p><div id="scope-badge" class="scope-badge hidden"></div></div><div class="manager-controls"><button id="chat-account-btn" class="ghost hidden" onclick="openChatAccount()">Configurar conta GLPI</button><button class="ghost" onclick="reindex()">Reindexar RAG</button></div></div>
           <div id="messages" class="messages"></div>
           <div id="attach-preview" class="attach-preview"></div>
           <form id="chat-form" class="chat-input">
@@ -61,6 +62,22 @@
     <section id="projetos" class="page">
       <div class="toolbar"><p>Codebases registradas para análise e documentação automática via OpenCode.</p><button onclick="openProject()">Novo projeto</button></div>
       <div id="project-list" class="cards"></div>
+    </section>
+    <section id="acessos" class="page">
+      <div class="toolbar">
+        <p>Perfis liberam o Gerente a projetos/componentes para usuários e canais — sincronizados de GLPI, Slack e Telegram.</p>
+        <button onclick="openProfileEditor()">Novo perfil</button>
+      </div>
+      <div class="acessos-grid">
+        <div class="panel">
+          <div class="panel-title"><div><h2>Perfis de acesso</h2><p>Modelos reutilizáveis de liberação.</p></div></div>
+          <div id="ap-profiles" class="ap-profiles"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><div><h2>Concessões ativas</h2><p>Quem tem acesso a quê, por usuário/canal.</p></div></div>
+          <div id="ap-grants" class="ap-grants"></div>
+        </div>
+      </div>
     </section>
     <section id="consumo" class="page">
       <div class="toolbar">
@@ -200,6 +217,19 @@
     </section>
   </main>
 
+  <dialog id="alert-dialog" class="simple-dialog">
+    <div class="dialog-head"><h2>Aviso</h2></div>
+    <p id="alert-msg"></p>
+    <div class="form-actions"><button type="button" onclick="closeAlert()">OK</button></div>
+  </dialog>
+  <dialog id="confirm-dialog" class="simple-dialog">
+    <div class="dialog-head"><h2>Confirmação</h2></div>
+    <p id="confirm-msg"></p>
+    <div class="form-actions">
+      <button type="button" class="ghost" onclick="confirmAnswer(false)">Cancelar</button>
+      <button type="button" onclick="confirmAnswer(true)">Sim</button>
+    </div>
+  </dialog>
   <dialog id="agent-dialog">
     <form id="agent-form">
       <input type="hidden" id="agent-id">
@@ -242,6 +272,51 @@
   <dialog id="project-doc-dialog" class="doc-dialog">
     <div class="dialog-head"><div><h2 id="doc-title">Documentação</h2><p id="doc-subtitle" class="meta"></p></div><button type="button" class="icon" onclick="closeProjectDoc()">×</button></div>
     <div id="doc-content" class="doc-content"></div>
+  </dialog>
+  <dialog id="profile-editor-dialog" class="ap-dialog">
+    <form id="profile-editor-form" onsubmit="return saveProfileEditor(event)">
+      <input type="hidden" id="ap-profile-id">
+      <div class="dialog-head"><div><h2 id="ap-editor-title">Novo perfil de acesso</h2><p class="meta">Defina os escopos (projeto/componente) e o papel liberado.</p></div><button type="button" class="icon" onclick="closeProfileEditor()">×</button></div>
+      <div class="row">
+        <label>Nome<input id="ap-name" required minlength="2" maxlength="80" placeholder="Ex: Suporte Homolog"></label>
+        <label>Descrição<input id="ap-desc" maxlength="240" placeholder="Curta (opcional)"></label>
+      </div>
+      <div class="ap-scopes-head"><strong>Escopos liberados</strong><button type="button" class="ghost" onclick="addProfileScope()">+ Escopo</button></div>
+      <div id="ap-scopes" class="ap-scopes"></div>
+      <div class="form-actions"><button type="button" class="ghost" onclick="closeProfileEditor()">Cancelar</button><button>Salvar perfil</button></div>
+    </form>
+  </dialog>
+  <dialog id="subject-picker-dialog" class="ap-dialog">
+    <div class="dialog-head"><div><h2>Aplicar perfil</h2><p id="ap-apply-sub" class="meta"></p></div><button type="button" class="icon" onclick="closeSubjectPicker()">×</button></div>
+    <input id="ap-subject-search" class="ap-search" placeholder="Buscar por nome, usuário ou canal..." oninput="renderSubjectList()">
+    <div class="ap-subject-tabs">
+      <button type="button" class="ap-tab active" data-stab="all" onclick="setSubjectTab('all')">Todos</button>
+      <button type="button" class="ap-tab" data-stab="glpi" onclick="setSubjectTab('glpi')">GLPI</button>
+      <button type="button" class="ap-tab" data-stab="chat" onclick="setSubjectTab('chat')">Slack / Telegram</button>
+    </div>
+    <div id="ap-subject-list" class="ap-subject-list"></div>
+  </dialog>
+  <dialog id="topology-dialog" class="doc-dialog topology-dialog">
+    <div class="dialog-head"><div><h2 id="topo-title">Topologia</h2><p id="topo-subtitle" class="meta"></p></div><button type="button" class="icon" onclick="closeTopology()">×</button></div>
+    <div class="topo-toolbar">
+      <button id="topo-scan-btn" onclick="scanTopology()">🔍 Escanear topologia</button>
+      <button class="ghost" onclick="confirmTopology()">✓ Confirmar selecionados</button>
+      <button class="ghost" onclick="syncTopologyGlpi()">🏢 Sincronizar GLPI</button>
+      <span id="topo-status" class="meta"></span>
+    </div>
+    <div id="topo-summary" class="topo-summary"></div>
+    <div class="topo-filterbar">
+      <input id="topo-search" placeholder="Filtrar por nome, caminho, tipo ou framework..." oninput="renderTopoTree()">
+      <select id="topo-filter" onchange="renderTopoTree()">
+        <option value="all">Todos os status</option>
+        <option value="confirmed">Confirmados</option>
+        <option value="detected">Detectados</option>
+        <option value="ignored">Ignorados</option>
+      </select>
+      <button type="button" class="ghost" onclick="toggleTopoSelection(true)">Selecionar todos</button>
+      <button type="button" class="ghost" onclick="toggleTopoSelection(false)">Limpar</button>
+    </div>
+    <div id="topo-tree" class="topo-tree"></div>
   </dialog>
   <dialog id="chat-account-dialog">
     <form id="chat-account-form">

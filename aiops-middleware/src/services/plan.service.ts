@@ -4,7 +4,9 @@ import { z } from "zod";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import * as audit from "./audit.service.js";
+import * as glpiEntity from "./glpi-entity.service.js";
 import * as glpi from "./glpi.service.js";
+import * as projectScope from "./project-scope.service.js";
 
 /**
  * Plano de chamados ("lote de requisições") elaborado pelo Gerente.
@@ -154,6 +156,15 @@ export async function confirmDraft(channel: string): Promise<{
 
   const items = planItemsSchema.parse(plan.items).sort((a, b) => a.ordem - b.ordem);
   const agents = await prisma.agent.findMany({ where: { enabled: true, glpiUserId: { not: null } } });
+  const activeScope = await projectScope.getScope(channel).catch(() => null);
+  // getScope() sempre retorna um objeto — só resolve entidade quando há escopo real.
+  const hasRealScope = Boolean(activeScope?.activeProjectId || activeScope?.activeComponentId);
+  const entityId = hasRealScope
+    ? await glpiEntity.resolveTicketEntity({
+        projectId: activeScope!.activeProjectId,
+        componentId: activeScope!.activeComponentId,
+      })
+    : undefined;
 
   // Retomada: se uma confirmação anterior falhou no meio, os chamados já
   // criados ficaram registrados em createdTicketIds — não duplicamos.
@@ -175,6 +186,7 @@ export async function confirmDraft(channel: string): Promise<{
       content: buildTicketContent(plan.goal, item, dependencyTickets),
       urgency: URGENCY_BY_PRIORITY[item.prioridade],
       type: glpi.GLPI_TICKET_TYPE.REQUEST,
+      entityId,
     });
 
     const entry: CreatedPlanTicket = { ordem: item.ordem, ticketId, titulo: item.titulo };
