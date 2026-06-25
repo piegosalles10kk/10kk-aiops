@@ -1,6 +1,8 @@
 import { Client as SshClient, type ConnectConfig } from "ssh2";
 import axios from "axios";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { env } from "../config/env.js";
 import { logger } from "../lib/logger.js";
 
@@ -82,6 +84,27 @@ function ssh2Exec(client: SshClient, command: string): Promise<SshExecResult> {
   });
 }
 
+function resolveKeyPath(raw: string): string {
+  if (raw.startsWith("~")) {
+    return join(homedir(), raw.slice(1));
+  }
+  return raw;
+}
+
+async function resolvePrivateKey(keyPath: string): Promise<string> {
+  const resolved = resolveKeyPath(keyPath);
+  try {
+    const buf = await readFile(resolved);
+    return buf.toString("utf8");
+  } catch (readErr) {
+    throw new Error(
+      `Arquivo de chave SSH não encontrado ou inacessível: "${resolved}". ` +
+      `Verifique se o caminho existe no container do middleware. ` +
+      `Se a chave está na máquina host, use sshAuthType="pm2" ou monte o volume no container.`,
+    );
+  }
+}
+
 function makeConnectConfig(conn: SshConnection): ConnectConfig {
   const config: ConnectConfig = {
     host: conn.host,
@@ -100,12 +123,7 @@ function makeConnectConfig(conn: SshConnection): ConnectConfig {
 
 async function execRemote(conn: SshConnection, command: string): Promise<SshExecResult> {
   if (conn.authType === "key" && conn.keyPath) {
-    try {
-      const buf = await readFile(conn.keyPath);
-      conn.keyPath = buf.toString("utf8");
-    } catch {
-      // Se o arquivo não existir, assume que keyPath já é o conteúdo da chave
-    }
+    conn.keyPath = await resolvePrivateKey(conn.keyPath);
   }
   const client = await ssh2Connect(makeConnectConfig(conn));
   try {
@@ -194,6 +212,9 @@ export async function testConnection(project: {
   }
 
   try {
+    if (conn.authType === "key" && conn.keyPath) {
+      conn.keyPath = await resolvePrivateKey(conn.keyPath);
+    }
     const client = await ssh2Connect(makeConnectConfig(conn));
     let hostInfo = "";
     try {
